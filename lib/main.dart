@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:metro_shift_roster/core/services/push_notification_service.dart';
 import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
@@ -14,10 +15,17 @@ import 'package:metro_shift_roster/features/auth/presentation/splash_screen.dart
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Initialize Supabase first
+  // 1. Load environment variables before initializing network services
+  try {
+    await dotenv.load(fileName: ".env");
+  } catch (e) {
+    debugPrint('DotEnv initialization error: $e');
+  }
+
+  // 2. Initialize Supabase
   await SupabaseService.initialize();
 
-  // 2. Initialize Firebase & Push Notifications safely (Android / iOS)
+  // 3. Initialize Firebase & Push Notifications safely (Mobile only)
   if (!kIsWeb) {
     try {
       await Firebase.initializeApp();

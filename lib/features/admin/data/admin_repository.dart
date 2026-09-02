@@ -8,10 +8,15 @@ class AdminRepository {
 
   Future<List<Map<String, dynamic>>> getSupervisors(String orgId) async {
     try {
-      final res = await _client
-          .rpc('get_org_supervisors_overview', params: {'p_org_id': orgId});
+      final res = await _client.rpc(
+        'get_org_supervisors_overview',
+        params: {'p_org_id': orgId},
+      );
       if (res != null && res is List) {
-        return res.map((e) => e as Map<String, dynamic>).toList();
+        return res
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .where((e) => e['role'] == 'supervisor') // Client-side guard
+            .toList();
       }
     } catch (_) {
       final fallbackRes = await _client
@@ -22,11 +27,13 @@ class AdminRepository {
 
       final totalStations =
           (await _client.from('stations').select('id') as List).length;
-      final totalOperators = (await _client
-              .from('profiles')
-              .select('id')
-              .eq('role', 'tom_operator') as List)
-          .length;
+      final totalOperators =
+          (await _client
+                      .from('profiles')
+                      .select('id')
+                      .eq('role', 'tom_operator')
+                  as List)
+              .length;
 
       final List<Map<String, dynamic>> list = [];
       for (final row in fallbackRes as List) {
@@ -66,13 +73,16 @@ class AdminRepository {
     String? email,
     required bool isActive,
   }) async {
-    await _client.from('profiles').update({
-      'full_name': fullName.trim(),
-      'phone_number': phoneNumber.trim(),
-      'email': email?.trim(),
-      'is_active': isActive,
-      'updated_at': DateTime.now().toIso8601String(),
-    }).eq('id', supervisorId);
+    await _client
+        .from('profiles')
+        .update({
+          'full_name': fullName.trim(),
+          'phone_number': phoneNumber.trim(),
+          'email': email?.trim(),
+          'is_active': isActive,
+          'updated_at': DateTime.now().toIso8601String(),
+        })
+        .eq('id', supervisorId);
   }
 
   Future<void> deleteSupervisor(String supervisorId) async {

@@ -8,18 +8,12 @@ final staffRepositoryProvider = Provider<StaffRepository>((ref) {
   return StaffRepository(SupabaseService.client);
 });
 
-// Change:
 final staffListProvider = FutureProvider<List<OperatorModel>>((ref) async {
   final user = ref.watch(authNotifierProvider).user;
-  if (user == null || user.orgId == null) return [];
+  final orgId = user?.orgId ?? '00000000-0000-0000-0000-000000000001';
 
-  final res = await SupabaseService.client
-      .from('profiles')
-      .select()
-      .eq('org_id', user.orgId!)
-      .order('full_name', ascending: true);
-
-  return (res as List).map((e) => OperatorModel.fromJson(e)).toList();
+  // Strictly delegates to StaffRepository, which queries ONLY 'tom_operator'
+  return ref.watch(staffRepositoryProvider).getOperators(orgId);
 });
 
 class StaffActionNotifier extends StateNotifier<AsyncValue<void>> {

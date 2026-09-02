@@ -3172,3 +3172,43 @@ END;
 $$;
 
 NOTIFY pgrst, 'reload schema';
+
+DROP FUNCTION IF EXISTS get_org_supervisors_overview(UUID);
+
+CREATE OR REPLACE FUNCTION get_org_supervisors_overview(p_org_id UUID)
+RETURNS TABLE (
+  id UUID,
+  org_id UUID,
+  full_name TEXT,
+  phone_number TEXT,
+  role TEXT,
+  is_active BOOLEAN,
+  is_reliever BOOLEAN,
+  parent_supervisor_id UUID,
+  total_stations BIGINT,
+  total_operators BIGINT
+) 
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT 
+    p.id,
+    p.org_id,
+    p.full_name,
+    p.phone_number,
+    p.role,
+    p.is_active,
+    p.is_reliever,
+    p.parent_supervisor_id,
+    (SELECT COUNT(*) FROM stations WHERE stations.org_id = p_org_id)::BIGINT AS total_stations,
+    (SELECT COUNT(*) FROM profiles WHERE profiles.org_id = p_org_id AND profiles.role = 'tom_operator')::BIGINT AS total_operators
+  FROM profiles p
+  WHERE p.org_id = p_org_id
+    AND p.role = 'supervisor'
+  ORDER BY p.full_name ASC;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION get_org_supervisors_overview(UUID) TO authenticated, anon;
