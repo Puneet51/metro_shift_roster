@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "541375224325",
+    "project_id": "metro-shift-roster-app",
+    "storage_bucket": "metro-shift-roster-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:541375224325:android:d95029144cf81f8e101a6c",
+        "android_client_info": {
+          "package_name": "com.metroshift.roster"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAGmu-CtuGx16ml9pw4DpdyKIOV5GWuK2s"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
