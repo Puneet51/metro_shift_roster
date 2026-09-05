@@ -15,7 +15,7 @@ class AdminRepository {
       if (res != null && res is List) {
         return res
             .map((e) => Map<String, dynamic>.from(e as Map))
-            .where((e) => e['role'] == 'supervisor') // Client-side guard
+            .where((e) => e['role'] == 'supervisor')
             .toList();
       }
     } catch (_) {
@@ -53,17 +53,36 @@ class AdminRepository {
     required String phoneNumber,
     String? email,
   }) async {
-    await _client.from('profiles').insert({
-      'id': const Uuid().v4(),
-      'org_id': orgId,
-      'role': 'supervisor',
-      'full_name': fullName.trim(),
-      'phone_number': phoneNumber.trim(),
-      'email': email?.trim(),
-      'pin_hash': '1234',
-      'has_pin': true,
-      'is_active': true,
-    });
+    final cleanPhone = phoneNumber.replaceAll(RegExp(r'\D'), '').trim();
+
+    try {
+      final res = await _client.rpc(
+        'create_native_staff_member',
+        params: {
+          'p_full_name': fullName.trim(),
+          'p_phone_number': cleanPhone,
+          'p_role': 'supervisor',
+          if (orgId.isNotEmpty) 'p_org_id': orgId,
+        },
+      );
+
+      final data = res as Map<String, dynamic>;
+      if (data['success'] != true) {
+        throw Exception(data['error'] ?? 'Failed to register supervisor');
+      }
+    } catch (_) {
+      await _client.from('profiles').insert({
+        'id': const Uuid().v4(),
+        'org_id': orgId,
+        'role': 'supervisor',
+        'full_name': fullName.trim(),
+        'phone_number': cleanPhone,
+        'email': email?.trim(),
+        'pin_hash': '1234',
+        'has_pin': true,
+        'is_active': true,
+      });
+    }
   }
 
   Future<void> updateSupervisor({
@@ -73,11 +92,13 @@ class AdminRepository {
     String? email,
     required bool isActive,
   }) async {
+    final cleanPhone = phoneNumber.replaceAll(RegExp(r'\D'), '').trim();
+
     await _client
         .from('profiles')
         .update({
           'full_name': fullName.trim(),
-          'phone_number': phoneNumber.trim(),
+          'phone_number': cleanPhone,
           'email': email?.trim(),
           'is_active': isActive,
           'updated_at': DateTime.now().toIso8601String(),
@@ -85,8 +106,19 @@ class AdminRepository {
         .eq('id', supervisorId);
   }
 
-  Future<void> deleteSupervisor(String supervisorId) async {
-    await _client.from('profiles').delete().eq('id', supervisorId);
+  Future<void> deleteSupervisor({
+    required String supervisorId,
+    required String adminId,
+  }) async {
+    final res = await _client.rpc(
+      'delete_supervisor_strict',
+      params: {'p_supervisor_id': supervisorId, 'p_admin_id': adminId},
+    );
+
+    final data = res as Map<String, dynamic>;
+    if (data['success'] != true) {
+      throw Exception(data['error'] ?? 'Failed to delete supervisor');
+    }
   }
 
   Future<void> setAppVersionConfig({

@@ -13,6 +13,8 @@ class UserModel {
   final String? uanNo;
   final String? faceEmbedding;
   final String? fcmToken;
+  final String? parentSupervisorId;
+  final bool isReliever;
 
   const UserModel({
     required this.id,
@@ -29,7 +31,20 @@ class UserModel {
     this.uanNo,
     this.faceEmbedding,
     this.fcmToken,
+    this.parentSupervisorId,
+    this.isReliever = false,
   });
+
+  /// Returns own ID if supervisor/admin, or the parent supervisor's ID if operator/reliever
+  String get effectiveSupervisorId {
+    if (role == 'supervisor' || role == 'admin') {
+      return id;
+    }
+    if (parentSupervisorId != null && parentSupervisorId!.isNotEmpty) {
+      return parentSupervisorId!;
+    }
+    return id;
+  }
 
   // Aliases for compatibility across screens
   String? get companyId => empCode;
@@ -53,7 +68,9 @@ class UserModel {
     String? uanNo,
     String? faceEmbedding,
     String? fcmToken,
-    bool? isFaceRegistered, // Handles UI updates when face is enrolled
+    String? parentSupervisorId,
+    bool? isReliever,
+    bool? isFaceRegistered,
   }) {
     return UserModel(
       id: id ?? this.id,
@@ -73,6 +90,8 @@ class UserModel {
           : (faceEmbedding ??
                 (isFaceRegistered == true ? 'enrolled' : this.faceEmbedding)),
       fcmToken: fcmToken ?? this.fcmToken,
+      parentSupervisorId: parentSupervisorId ?? this.parentSupervisorId,
+      isReliever: isReliever ?? this.isReliever,
     );
   }
 
@@ -92,6 +111,8 @@ class UserModel {
       'uan_no': uanNo,
       'face_embedding': faceEmbedding,
       'fcm_token': fcmToken,
+      'parent_supervisor_id': parentSupervisorId,
+      'is_reliever': isReliever,
     };
   }
 
@@ -113,6 +134,8 @@ class UserModel {
       uanNo: map['uan_no']?.toString(),
       faceEmbedding: map['face_embedding']?.toString(),
       fcmToken: map['fcm_token']?.toString(),
+      parentSupervisorId: map['parent_supervisor_id']?.toString(),
+      isReliever: map['is_reliever'] == true || map['is_reliever'] == 'true',
     );
   }
 }

@@ -36,22 +36,26 @@ class _CreateEditStationScreenState
     super.initState();
     final stn = widget.station;
     _nameController = TextEditingController(text: stn?.name ?? '');
-    _latController =
-        TextEditingController(text: stn != null ? stn.latitude.toString() : '');
+    _latController = TextEditingController(
+      text: stn != null ? stn.latitude.toString() : '',
+    );
     _lngController = TextEditingController(
-        text: stn != null ? stn.longitude.toString() : '');
+      text: stn != null ? stn.longitude.toString() : '',
+    );
     _radiusController = TextEditingController(
-        text: stn != null ? stn.punchRadiusMeters.toString() : '600');
+      text: stn != null ? stn.punchRadiusMeters.toString() : '600',
+    );
     _amountController = TextEditingController(
-        text: stn != null ? stn.defaultFixedAmount.toString() : '700');
+      text: stn != null ? stn.defaultFixedAmount.toString() : '700',
+    );
 
     if (stn != null) {
       _tomSystems.addAll(stn.operatingSystems.map((e) => e.systemName));
-      _shiftTemplates.addAll(stn.shiftTemplates.map((e) => {
-            'name': e.shiftName,
-            'start': e.startTime,
-            'end': e.endTime,
-          }));
+      _shiftTemplates.addAll(
+        stn.shiftTemplates.map(
+          (e) => {'name': e.shiftName, 'start': e.startTime, 'end': e.endTime},
+        ),
+      );
     } else {
       _tomSystems.addAll(['TOM 01', 'TOM 02']);
       _shiftTemplates.addAll([
@@ -82,15 +86,18 @@ class _CreateEditStationScreenState
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Coordinates captured!'),
-              backgroundColor: Colors.green),
+            content: Text('Coordinates captured!'),
+            backgroundColor: Colors.green,
+          ),
         );
       }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text(e.toString()), backgroundColor: Colors.redAccent),
+            content: Text(e.toString()),
+            backgroundColor: Colors.redAccent,
+          ),
         );
       }
     } finally {
@@ -129,7 +136,8 @@ class _CreateEditStationScreenState
 
     return Scaffold(
       appBar: AppBar(
-          title: Text(isEditing ? 'Edit Station' : 'Create Metro Station')),
+        title: Text(isEditing ? 'Edit Station' : 'Create Metro Station'),
+      ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16.0),
         child: Form(
@@ -140,7 +148,9 @@ class _CreateEditStationScreenState
               TextFormField(
                 controller: _nameController,
                 decoration: const InputDecoration(
-                    labelText: 'Station Name', border: OutlineInputBorder()),
+                  labelText: 'Station Name',
+                  border: OutlineInputBorder(),
+                ),
                 validator: (v) => v == null || v.trim().isEmpty
                     ? 'Station name required'
                     : null,
@@ -152,7 +162,9 @@ class _CreateEditStationScreenState
                     child: TextFormField(
                       controller: _latController,
                       decoration: const InputDecoration(
-                          labelText: 'Latitude', border: OutlineInputBorder()),
+                        labelText: 'Latitude',
+                        border: OutlineInputBorder(),
+                      ),
                       validator: (v) =>
                           v == null || v.isEmpty ? 'Required' : null,
                     ),
@@ -162,7 +174,9 @@ class _CreateEditStationScreenState
                     child: TextFormField(
                       controller: _lngController,
                       decoration: const InputDecoration(
-                          labelText: 'Longitude', border: OutlineInputBorder()),
+                        labelText: 'Longitude',
+                        border: OutlineInputBorder(),
+                      ),
                       validator: (v) =>
                           v == null || v.isEmpty ? 'Required' : null,
                     ),
@@ -171,7 +185,9 @@ class _CreateEditStationScreenState
                   ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 16),
+                        horizontal: 12,
+                        vertical: 16,
+                      ),
                       backgroundColor: const Color(0xFF1E3A8A),
                     ),
                     onPressed: _isFetchingLocation ? null : _fetchAutoLocation,
@@ -180,10 +196,15 @@ class _CreateEditStationScreenState
                             width: 16,
                             height: 16,
                             child: CircularProgressIndicator(
-                                color: Colors.white, strokeWidth: 2))
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          )
                         : const Icon(Icons.my_location, color: Colors.white),
-                    label: const Text('Auto Set',
-                        style: TextStyle(color: Colors.white)),
+                    label: const Text(
+                      'Auto Set',
+                      style: TextStyle(color: Colors.white),
+                    ),
                   ),
                 ],
               ),
@@ -195,8 +216,9 @@ class _CreateEditStationScreenState
                       controller: _radiusController,
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
-                          labelText: 'Punch Radius (M)',
-                          border: OutlineInputBorder()),
+                        labelText: 'Punch Radius (M)',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -205,15 +227,18 @@ class _CreateEditStationScreenState
                       controller: _amountController,
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
-                          labelText: 'Fixed Daily Rate (₹)',
-                          border: OutlineInputBorder()),
+                        labelText: 'Fixed Daily Rate (₹)',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 24),
-              const Text('Add Station Shifts (e.g. A Shift, B Shift)',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text(
+                'Add Station Shifts (e.g. A Shift, B Shift)',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
               const SizedBox(height: 8),
               Card(
                 color: Colors.grey.shade50,
@@ -224,8 +249,9 @@ class _CreateEditStationScreenState
                       TextFormField(
                         controller: _newShiftNameController,
                         decoration: const InputDecoration(
-                            labelText: 'Shift Name',
-                            border: OutlineInputBorder()),
+                          labelText: 'Shift Name',
+                          border: OutlineInputBorder(),
+                        ),
                       ),
                       const SizedBox(height: 8),
                       Row(
@@ -234,13 +260,15 @@ class _CreateEditStationScreenState
                             child: OutlinedButton(
                               onPressed: () async {
                                 final t = await showTimePicker(
-                                    context: context,
-                                    initialTime: _newShiftStart);
+                                  context: context,
+                                  initialTime: _newShiftStart,
+                                );
                                 if (t != null)
                                   setState(() => _newShiftStart = t);
                               },
                               child: Text(
-                                  'Start: ${_newShiftStart.format(context)}'),
+                                'Start: ${_newShiftStart.format(context)}',
+                              ),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -248,12 +276,14 @@ class _CreateEditStationScreenState
                             child: OutlinedButton(
                               onPressed: () async {
                                 final t = await showTimePicker(
-                                    context: context,
-                                    initialTime: _newShiftEnd);
+                                  context: context,
+                                  initialTime: _newShiftEnd,
+                                );
                                 if (t != null) setState(() => _newShiftEnd = t);
                               },
-                              child:
-                                  Text('End: ${_newShiftEnd.format(context)}'),
+                              child: Text(
+                                'End: ${_newShiftEnd.format(context)}',
+                              ),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -279,11 +309,14 @@ class _CreateEditStationScreenState
                     dense: true,
                     leading: const Icon(Icons.alarm, color: Color(0xFF1E3A8A)),
                     title: Text(
-                        '${item['name']}: ${item['start']} - ${item['end']}',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                      '${item['name']}: ${item['start']} - ${item['end']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
                     trailing: IconButton(
-                      icon: const Icon(Icons.remove_circle,
-                          color: Colors.redAccent),
+                      icon: const Icon(
+                        Icons.remove_circle,
+                        color: Colors.redAccent,
+                      ),
                       onPressed: () =>
                           setState(() => _shiftTemplates.removeAt(i)),
                     ),
@@ -291,8 +324,10 @@ class _CreateEditStationScreenState
                 },
               ),
               const SizedBox(height: 20),
-              const Text('TOM Operating Systems',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const Text(
+                'TOM Operating Systems',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              ),
               const SizedBox(height: 8),
               Row(
                 children: [
@@ -300,24 +335,29 @@ class _CreateEditStationScreenState
                     child: TextField(
                       controller: _customTomController,
                       decoration: const InputDecoration(
-                          hintText: 'Add Counter (e.g. TOM 03)',
-                          border: OutlineInputBorder()),
+                        hintText: 'Add Counter (e.g. TOM 03)',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton(
-                      onPressed: _addTomSystem, child: const Text('Add')),
+                    onPressed: _addTomSystem,
+                    child: const Text('Add'),
+                  ),
                 ],
               ),
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8.0,
                 children: _tomSystems
-                    .map((sys) => Chip(
-                          label: Text(sys),
-                          onDeleted: () =>
-                              setState(() => _tomSystems.remove(sys)),
-                        ))
+                    .map(
+                      (sys) => Chip(
+                        label: Text(sys),
+                        onDeleted: () =>
+                            setState(() => _tomSystems.remove(sys)),
+                      ),
+                    )
                     .toList(),
               ),
               const SizedBox(height: 32),
@@ -333,9 +373,11 @@ class _CreateEditStationScreenState
                         if (_shiftTemplates.isEmpty) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                                content: Text(
-                                    'Please add at least one shift template.'),
-                                backgroundColor: Colors.redAccent),
+                              content: Text(
+                                'Please add at least one shift template.',
+                              ),
+                              backgroundColor: Colors.redAccent,
+                            ),
                           );
                           return;
                         }
@@ -344,15 +386,19 @@ class _CreateEditStationScreenState
                             .saveStation(
                               stationId: widget.station?.id,
                               name: _nameController.text.trim(),
-                              latitude:
-                                  double.parse(_latController.text.trim()),
-                              longitude:
-                                  double.parse(_lngController.text.trim()),
+                              latitude: double.parse(
+                                _latController.text.trim(),
+                              ),
+                              longitude: double.parse(
+                                _lngController.text.trim(),
+                              ),
                               punchRadius:
                                   int.tryParse(_radiusController.text.trim()) ??
-                                      600,
-                              fixedAmount: double.tryParse(
-                                      _amountController.text.trim()) ??
+                                  600,
+                              fixedAmount:
+                                  double.tryParse(
+                                    _amountController.text.trim(),
+                                  ) ??
                                   700.00,
                               tomSystems: _tomSystems,
                               shiftTemplates: _shiftTemplates,
@@ -366,9 +412,11 @@ class _CreateEditStationScreenState
                             ? 'Update Metro Station'
                             : 'Save Metro Station',
                         style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16)),
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
               ),
             ],
           ),

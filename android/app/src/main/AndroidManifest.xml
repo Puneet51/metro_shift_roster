@@ -11,10 +11,24 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
+    <!-- Android 11+ Package Visibility for External Browser / Downloads -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
+    </queries>
+
     <application
         android:label="Metro Shift Roster"
         android:name="${applicationName}"
-        android:icon="@mipmap/launcher_icon">
+        android:icon="@mipmap/ic_launcher">
 
         <!-- Android v2 Embedding Declaration -->
         <meta-data
@@ -26,11 +40,6 @@
             android:name="com.google.firebase.messaging.default_notification_channel_id"
             android:value="metro_shift_high_importance_channel" />
 
-        <!-- High Priority Notification Channel Metadata -->
-        <meta-data
-            android:name="com.google.firebase.messaging.default_notification_channel_id"
-            android:value="metro_shift_high_importance_channel" />
-
         <!-- Default Notification Icon & Accent Color -->
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_icon"
@@ -38,7 +47,6 @@
         <meta-data
             android:name="com.google.firebase.messaging.default_notification_color"
             android:resource="@android:color/holo_blue_dark" />
-
 
         <activity
             android:name=".MainActivity"

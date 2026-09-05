@@ -1,116 +1,68 @@
+-- Disable triggers temporarily to prevent foreign key constraint order issues
+SET session_replication_role = 'replica';
+
+-- 1. Wipe test attendance and punch sessions
+TRUNCATE TABLE public.attendance RESTART IDENTITY CASCADE;
+
+-- 2. Wipe test shifts and shift assignments
+TRUNCATE TABLE public.shift_assignments RESTART IDENTITY CASCADE;
+TRUNCATE TABLE public.shifts RESTART IDENTITY CASCADE;
+
+-- 3. Wipe test notifications
+TRUNCATE TABLE public.notifications RESTART IDENTITY CASCADE;
+
+-- wipe test stastion 
+TRUNCATE TABLE public.stations RESTART IDENTITY CASCADE;
+TRUNCATE TABLE public.station_shift_templates RESTART IDENTITY CASCADE;
+TRUNCATE TABLE public.station_operating_systems RESTART IDENTITY CASCADE;
+
+-- 4. Wipe test leaves and week-offs (if tables exist)
 DO $$
-DECLARE
-    t text;
-    target_tables text[] := ARRAY[
-        'rosters',
-        'shift_rosters',
-        'shifts',
-        'attendance',
-        'attendances',
-        'attendance_records',
-        'leaves',
-        'leave_requests',
-        'swaps',
-        'shift_swaps',
-        'notifications',
-        'user_notifications',
-        'push_tokens'
-    ];
 BEGIN
-    -- 1. Truncate only the operational tables that actually exist
-    FOREACH t IN ARRAY target_tables
-    LOOP
-        IF EXISTS (
-            SELECT 1 
-            FROM information_schema.tables 
-            WHERE table_schema = 'public' 
-              AND table_name = t
-        ) THEN
-            EXECUTE format('TRUNCATE TABLE public.%I CASCADE;', t);
-            RAISE NOTICE 'Truncated table: public.%', t;
-        END IF;
-    END LOOP;
-
-    -- 2. Clear dummy users by casting role to text (protects all admin accounts regardless of casing)
-    IF EXISTS (
-        SELECT 1 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-          AND table_name = 'profiles'
-    ) THEN
-        DELETE FROM public.profiles 
-        WHERE LOWER(role::text) NOT LIKE '%admin%';
-        RAISE NOTICE 'Cleared non-admin profiles.';
-    END IF;
-
-    -- 3. Reset app versions to default initial state
-    IF EXISTS (
-        SELECT 1 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-          AND table_name = 'app_versions'
-    ) THEN
-        UPDATE public.app_versions
-        SET 
-            is_mandatory = false,
-            force_update = false,
-            version = '1.0.0',
-            latest_version = '1.0.0',
-            min_version = '1.0.0',
-            min_supported_version = '1.0.0',
-            release_notes = 'Initial release',
-            description = 'Stable release',
-            updated_at = NOW();
-        RAISE NOTICE 'Reset app_versions configuration.';
-    END IF;
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'leaves') THEN
+    TRUNCATE TABLE public.leaves RESTART IDENTITY CASCADE;
+  END IF;
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'week_offs') THEN
+    TRUNCATE TABLE public.week_offs RESTART IDENTITY CASCADE;
+  END IF;
 END $$;
 
-NOTIFY pgrst, 'reload schema';
+-- 5. Wipe test operators/profiles (Preserving Admins)
+DELETE FROM public.profiles
+WHERE role != 'admin';
 
-DO $$ 
-DECLARE 
-    r RECORD;
-BEGIN
-    -- 1. Truncate every user-created table in public schema except app_versions
-    FOR r IN (
-        SELECT tablename 
-        FROM pg_tables 
-        WHERE schemaname = 'public' 
-          AND tablename NOT IN ('app_versions', 'schema_migrations')
-    ) 
-    LOOP
-        EXECUTE format('TRUNCATE TABLE public.%I CASCADE;', r.tablename);
-        RAISE NOTICE 'Truncated: %', r.tablename;
-    END LOOP;
-
-    -- 2. Clear Supabase Auth accounts (wipes logins, tokens, identities)
-    TRUNCATE TABLE auth.identities CASCADE;
-    TRUNCATE TABLE auth.users CASCADE;
-
-    -- 3. Reset app_versions back to default initial state
-    IF EXISTS (
-        SELECT 1 
-        FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-          AND table_name = 'app_versions'
-    ) THEN
-        UPDATE public.app_versions
-        SET 
-            is_mandatory = false,
-            force_update = false,
-            version = '1.0.0',
-            latest_version = '1.0.0',
-            min_version = '1.0.0',
-            min_supported_version = '1.0.0',
-            release_notes = 'Initial release',
-            description = 'Stable release',
-            updated_at = NOW();
-    END IF;
-END $$;
-
-NOTIFY pgrst, 'reload schema';
+-- Re-enable normal trigger execution and constraints
+SET session_replication_role = 'origin';
 
 
-SELECT 'profiles' AS table_name, count(*) FROM public.profiles
+SET session_replication_role = 'replica';
+
+-- Clean non-admin test accounts out of auth.users
+DELETE FROM auth.users
+WHERE id NOT IN (
+    SELECT id FROM public.profiles WHERE role = 'admin'
+);
+
+DELETE FROM public.profiles
+WHERE role != 'admin';
+
+SET session_replication_role = 'origin';
+
+
+
+-- verify data deleted or not
+SELECT 'attendance' AS table_name, count(*) AS total_rows FROM public.attendance
 UNION ALL
-SELECT 'users' AS table_name, count(*) FROM auth.users;
+SELECT 'shift_assignments', count(*) FROM public.shift_assignments
+UNION ALL
+SELECT 'shifts', count(*) FROM public.shifts
+UNION ALL
+SELECT 'notifications', count(*) FROM public.notifications
+UNION ALL
+SELECT 'profiles (non-admin)', count(*) FROM public.profiles WHERE role != 'admin'
+UNION ALL
+SELECT 'profiles (admin preserved)', count(*) FROM public.profiles WHERE role = 'admin'
+UNION ALL
+SELECT 'stations (preserved)', count(*) FROM public.stations
+UNION ALL
+SELECT 'app_versions (preserved)', count(*) FROM public.app_versions;

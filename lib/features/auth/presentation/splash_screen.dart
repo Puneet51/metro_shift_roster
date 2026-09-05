@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:metro_shift_roster/features/app_version/presentation/mandatory_update_screen.dart';
 
@@ -20,7 +21,8 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _initVersionCheck() async {
-    await Future.delayed(const Duration(milliseconds: 200));
+    // Keep splash visible briefly so the logo displays smoothly
+    await Future.delayed(const Duration(milliseconds: 1200));
     if (!mounted) return;
 
     final isMandatoryUpdate = await checkAppVersion(context);
@@ -36,9 +38,56 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
+    return Scaffold(
       backgroundColor: Colors.white,
-      body: Center(child: CircularProgressIndicator(color: Color(0xFF1E3A8A))),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(24),
+              child: Image.asset(
+                'assets/images/metro_logo.png',
+                width: 110,
+                height: 110,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  width: 110,
+                  height: 110,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E3A8A),
+                    borderRadius: BorderRadius.circular(24),
+                  ),
+                  child: const Icon(
+                    Icons.subway_rounded,
+                    size: 60,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'Metro Shift Roster',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1E3A8A),
+                letterSpacing: 0.5,
+              ),
+            ),
+            const SizedBox(height: 32),
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.2,
+                color: Color(0xFF1E3A8A),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -84,11 +133,13 @@ Future<bool> checkAppVersion(BuildContext context) async {
     final String desc = (res['description'] ?? res['release_notes'] ?? '')
         .toString();
 
-    const String currentVer = '1.0.0';
+    // Dynamically reads the installed APK/iOS app version from pubspec.yaml
+    final packageInfo = await PackageInfo.fromPlatform();
+    final String currentVer = packageInfo.version;
 
     final bool needsUpdate = isVersionOlder(currentVer, minVer);
     debugPrint(
-      'Current: $currentVer | Target Min: $minVer | Force: $force | NeedsUpdate: $needsUpdate',
+      'Current Installed: $currentVer | Target Min: $minVer | Force: $force | NeedsUpdate: $needsUpdate',
     );
 
     if (force && needsUpdate) {

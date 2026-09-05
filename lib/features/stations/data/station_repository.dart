@@ -1,4 +1,6 @@
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 import 'station_model.dart';
 
 class StationRepository {
@@ -6,41 +8,58 @@ class StationRepository {
 
   StationRepository(this._client);
 
-  /// Fetch all stations for the entire organization
-  Future<List<StationModel>> getStations(String orgId) async {
-    final response = await _client
-        .from('stations')
-        .select('*, station_operating_systems(*), station_shift_templates(*)')
-        .eq('org_id', orgId)
-        .order('name', ascending: true);
+  /// Dynamically fetches stations strictly matching the requesting supervisor
+  Future<List<StationModel>> getStations(
+    String orgId, {
+    required String supervisorId,
+    required bool isAdmin,
+  }) async {
+    try {
+      var query = _client
+          .from('stations')
+          .select('''
+        id,
+        org_id,
+        supervisor_id,
+        name,
+        code,
+        latitude,
+        longitude,
+        punch_radius_meters,
+        default_fixed_amount,
+        shift_templates,
+        is_active,
+        created_at,
+        station_operating_systems (
+          id,
+          station_id,
+          system_name,
+          is_active
+        )
+      ''')
+          .eq('is_active', true);
 
-    final List<StationModel> stations = [];
+      // Strict dynamic check: Non-admins only see stations matching their own supervisor ID
+      if (!isAdmin) {
+        if (supervisorId.isEmpty) return [];
+        query = query.eq('supervisor_id', supervisorId);
+      }
 
-    for (final item in response as List) {
-      final s = item as Map<String, dynamic>;
-      final rawSystems = s['station_operating_systems'] as List? ?? [];
-      final rawTemplates = s['station_shift_templates'] as List? ?? [];
+      final res = await query.order('name', ascending: true);
 
-      final systems = rawSystems
-          .map((sys) =>
-              StationOperatingSystemModel.fromMap(sys as Map<String, dynamic>))
+      return (res as List)
+          .map<StationModel>(
+            (map) =>
+                StationModel.fromMap(Map<String, dynamic>.from(map as Map)),
+          )
           .toList();
-
-      final templates = rawTemplates
-          .map((tmpl) =>
-              StationShiftTemplate.fromMap(tmpl as Map<String, dynamic>))
-          .toList();
-
-      stations.add(StationModel.fromMap(
-        s,
-        operatingSystems: systems,
-        shiftTemplates: templates,
-      ));
+    } catch (e, st) {
+      debugPrint('❌ [GET STATIONS ERROR]: $e\n$st');
+      return [];
     }
-    return stations;
   }
 
-  /// Add or Edit a station (available to all supervisors)
+  /// Dynamically creates or updates station along with operating systems
   Future<void> saveStation({
     String? stationId,
     required String orgId,
@@ -53,68 +72,64 @@ class StationRepository {
     required List<String> tomSystems,
     required List<Map<String, String>> shiftTemplates,
   }) async {
-    String targetStationId;
+    try {
+      final isNew = stationId == null || stationId.isEmpty;
+      final targetId = isNew ? const Uuid().v4() : stationId;
+      final cleanCode = name.replaceAll(RegExp(r'\s+'), '').toUpperCase();
+      final code = cleanCode.length >= 4
+          ? cleanCode.substring(0, 4)
+          : cleanCode;
 
-    if (stationId != null && stationId.isNotEmpty) {
-      targetStationId = stationId;
-      await _client.from('stations').update({
+      final data = {
+        'id': targetId,
+        if (orgId.isNotEmpty) 'org_id': orgId,
+        'supervisor_id': supervisorId,
         'name': name.trim(),
+        'code': code,
         'latitude': latitude,
         'longitude': longitude,
         'punch_radius_meters': punchRadius,
         'default_fixed_amount': fixedAmount,
-      }).eq('id', targetStationId);
+        'shift_templates': shiftTemplates,
+        'is_active': true,
+      };
+
+      if (isNew) {
+        await _client.from('stations').insert(data);
+      } else {
+        await _client.from('stations').update(data).eq('id', targetId);
+      }
 
       await _client
           .from('station_operating_systems')
           .delete()
-          .eq('station_id', targetStationId);
-      await _client
-          .from('station_shift_templates')
-          .delete()
-          .eq('station_id', targetStationId);
-    } else {
-      final res = await _client
-          .from('stations')
-          .insert({
-            'org_id': orgId,
-            'supervisor_id': supervisorId,
-            'name': name.trim(),
-            'latitude': latitude,
-            'longitude': longitude,
-            'punch_radius_meters': punchRadius,
-            'default_fixed_amount': fixedAmount,
-          })
-          .select()
-          .single();
-      targetStationId = res['id'] as String;
-    }
+          .eq('station_id', targetId);
 
-    if (tomSystems.isNotEmpty) {
-      final systemsPayload = tomSystems
-          .map((sys) => {
-                'station_id': targetStationId,
+      if (tomSystems.isNotEmpty) {
+        final systemsToInsert = tomSystems
+            .map(
+              (sys) => {
+                'id': const Uuid().v4(),
+                'station_id': targetId,
                 'system_name': sys.trim(),
-                'is_default': true,
-              })
-          .toList();
-      await _client.from('station_operating_systems').insert(systemsPayload);
-    }
+                'is_active': true,
+              },
+            )
+            .toList();
 
-    if (shiftTemplates.isNotEmpty) {
-      final templatesPayload = shiftTemplates
-          .map((tmpl) => {
-                'station_id': targetStationId,
-                'shift_name': tmpl['name']!,
-                'start_time': tmpl['start']!,
-                'end_time': tmpl['end']!,
-              })
-          .toList();
-      await _client.from('station_shift_templates').insert(templatesPayload);
+        await _client.from('station_operating_systems').insert(systemsToInsert);
+      }
+    } catch (e, st) {
+      debugPrint('❌ [SAVE STATION ERROR]: $e\n$st');
+      rethrow;
     }
   }
 
   Future<void> deleteStation(String stationId) async {
+    await _client
+        .from('station_operating_systems')
+        .delete()
+        .eq('station_id', stationId);
     await _client.from('stations').delete().eq('id', stationId);
   }
 }

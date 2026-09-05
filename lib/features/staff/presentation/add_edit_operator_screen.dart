@@ -58,7 +58,9 @@ class _AddEditOperatorScreenState extends ConsumerState<AddEditOperatorScreen> {
               TextFormField(
                 controller: _nameController,
                 decoration: const InputDecoration(
-                    labelText: 'Full Name', border: OutlineInputBorder()),
+                  labelText: 'Full Name',
+                  border: OutlineInputBorder(),
+                ),
                 validator: (v) =>
                     v == null || v.trim().isEmpty ? 'Name is required' : null,
               ),
@@ -67,7 +69,9 @@ class _AddEditOperatorScreenState extends ConsumerState<AddEditOperatorScreen> {
                 controller: _phoneController,
                 keyboardType: TextInputType.phone,
                 decoration: const InputDecoration(
-                    labelText: 'Phone Number', border: OutlineInputBorder()),
+                  labelText: 'Phone Number',
+                  border: OutlineInputBorder(),
+                ),
                 validator: (v) => v == null || v.trim().length < 10
                     ? 'Valid 10-digit phone required'
                     : null,
@@ -76,27 +80,31 @@ class _AddEditOperatorScreenState extends ConsumerState<AddEditOperatorScreen> {
               TextFormField(
                 controller: _bmrclController,
                 decoration: const InputDecoration(
-                    labelText: 'BMRCL ID (Optional)',
-                    border: OutlineInputBorder()),
+                  labelText: 'BMRCL ID (Optional)',
+                  border: OutlineInputBorder(),
+                ),
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _companyController,
                 decoration: const InputDecoration(
-                    labelText: 'Company ID (Optional)',
-                    border: OutlineInputBorder()),
+                  labelText: 'Company ID (Optional)',
+                  border: OutlineInputBorder(),
+                ),
               ),
               const SizedBox(height: 16),
               TextFormField(
                 controller: _bioController,
                 decoration: const InputDecoration(
-                    labelText: 'Biometric ID (Optional)',
-                    border: OutlineInputBorder()),
+                  labelText: 'Biometric ID (Optional)',
+                  border: OutlineInputBorder(),
+                ),
               ),
               const SizedBox(height: 24),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
                 onPressed: actionState.isLoading
                     ? null
                     : () async {
@@ -106,18 +114,21 @@ class _AddEditOperatorScreenState extends ConsumerState<AddEditOperatorScreen> {
                               .read(staffActionNotifierProvider.notifier)
                               .updateOperator(
                                 operatorId: widget.operator!.id,
-                                fullName: _nameController.text,
-                                phoneNumber: _phoneController.text,
-                                biometricId: _bioController.text,
-                                companyId: _companyController.text,
-                                bmrclId: _bmrclController.text,
+                                fullName: _nameController.text.trim(),
+                                phoneNumber: _phoneController.text.trim(),
+                                biometricId: _bioController.text.trim(),
+                                companyId: _companyController.text.trim(),
+                                bmrclId: _bmrclController.text.trim(),
                               );
                         } else {
                           await ref
                               .read(staffActionNotifierProvider.notifier)
                               .addOperator(
-                                _nameController.text,
-                                _phoneController.text,
+                                fullName: _nameController.text.trim(),
+                                phoneNumber: _phoneController.text.trim(),
+                                biometricId: _bioController.text.trim(),
+                                companyId: _companyController.text.trim(),
+                                bmrclId: _bmrclController.text.trim(),
                               );
                         }
                         if (mounted) Navigator.pop(context);

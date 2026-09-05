@@ -558,6 +558,7 @@ class _SupervisorRosterScreenState
       floatingActionButton: widget.isReadOnly
           ? null
           : FloatingActionButton.extended(
+              heroTag: 'supervisor_publish_shift_fab',
               backgroundColor: const Color(0xFF1E3A8A),
               foregroundColor: Colors.white,
               elevation: 3,

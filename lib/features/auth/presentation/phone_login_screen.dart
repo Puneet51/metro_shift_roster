@@ -95,14 +95,19 @@ class _PhoneLoginScreenState extends ConsumerState<PhoneLoginScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Center(
-                    child: Image.asset(
-                      'assets/images/app_logo.png',
-                      width: 90,
-                      height: 90,
-                      errorBuilder: (context, error, stackTrace) => const Icon(
-                        Icons.subway_rounded,
-                        size: 80,
-                        color: Color(0xFF1E3A8A),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(20),
+                      child: Image.asset(
+                        'assets/images/metro_logo.png',
+                        width: 85,
+                        height: 85,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) =>
+                            const Icon(
+                              Icons.subway_rounded,
+                              size: 80,
+                              color: Color(0xFF1E3A8A),
+                            ),
                       ),
                     ),
                   ),

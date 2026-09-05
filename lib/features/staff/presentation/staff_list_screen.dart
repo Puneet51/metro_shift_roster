@@ -483,6 +483,7 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
         ),
       ),
       floatingActionButton: FloatingActionButton.extended(
+        heroTag: 'staff_add_fab',
         backgroundColor: const Color(0xFF1E3A8A),
         foregroundColor: Colors.white,
         elevation: 3,

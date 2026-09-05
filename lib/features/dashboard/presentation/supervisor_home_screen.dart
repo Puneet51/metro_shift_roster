@@ -8,6 +8,7 @@ import 'package:metro_shift_roster/features/staff/presentation/staff_list_screen
 import 'package:metro_shift_roster/features/staff/presentation/week_off_leave_screen.dart';
 import 'package:metro_shift_roster/features/shifts/presentation/supervisor_roster_screen.dart';
 import 'package:metro_shift_roster/features/shifts/presentation/create_edit_shift_screen.dart';
+import 'package:metro_shift_roster/features/shifts/presentation/shift_provider.dart';
 import 'package:metro_shift_roster/features/punch_attendance/presentation/punch_audit_check_screen.dart';
 import 'package:metro_shift_roster/features/punch_attendance/presentation/punch_history_screen.dart';
 import 'package:metro_shift_roster/features/profile/presentation/profile_screen.dart';
@@ -38,8 +39,18 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
         .onPostgresChanges(
           event: PostgresChangeEvent.all,
           schema: 'public',
+          table: 'shifts',
+          callback: (_) {
+            ref.invalidate(supervisorShiftsProvider);
+            if (mounted) setState(() {});
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
           table: 'shift_assignments',
           callback: (_) {
+            ref.invalidate(supervisorShiftsProvider);
             if (mounted) setState(() {});
           },
         )
@@ -48,6 +59,7 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
           schema: 'public',
           table: 'attendance',
           callback: (_) {
+            ref.invalidate(supervisorShiftsProvider);
             if (mounted) setState(() {});
           },
         )
@@ -99,10 +111,17 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
           IconButton(
             icon: const Icon(Icons.add_circle_outline_rounded),
             tooltip: 'Publish Shift',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const CreateEditShiftScreen()),
-            ),
+            onPressed: () async {
+              await Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const CreateEditShiftScreen(),
+                ),
+              );
+              // Force update roster data when supervisor finishes publishing/editing
+              ref.invalidate(supervisorShiftsProvider);
+              if (mounted) setState(() {});
+            },
           ),
           IconButton(
             icon: const Icon(Icons.account_circle_outlined),

@@ -36,7 +36,6 @@ class FaceBiometricService {
 
       if (v1.isEmpty || v2.isEmpty) return 0.0;
 
-      // Adjust length match
       final len = min(v1.length, v2.length);
       if (len < 16) return 0.0;
 
@@ -56,7 +55,6 @@ class FaceBiometricService {
       if (mag1 == 0.0 || mag2 == 0.0) return 0.0;
       final similarity = dot / (mag1 * mag2);
 
-      // Clamp to range [0.0, 1.0]
       return similarity.clamp(0.0, 1.0);
     } catch (_) {
       return 0.0;
@@ -97,7 +95,6 @@ class FaceBiometricService {
     final List<double> vector = [];
     final box = face.boundingBox;
 
-    // Normalize coordinates relative to bounding box center to eliminate distance scaling
     final centerX = box.left + box.width / 2.0;
     final centerY = box.top + box.height / 2.0;
     final scale = max(box.width, box.height).toDouble();
@@ -138,7 +135,6 @@ class FaceBiometricService {
       vector.removeRange(192, vector.length);
     }
 
-    // Unit vector normalization
     double norm = 0.0;
     for (final v in vector) {
       norm += v * v;

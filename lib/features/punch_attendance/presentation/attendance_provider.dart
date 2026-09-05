@@ -2,7 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
 
-// 1. Active Punch Session for Operator
+// 1. Active Punch Session for the Logged-in User
 final activePunchSessionProvider =
     FutureProvider.autoDispose<Map<String, dynamic>?>((ref) async {
       final user = ref.watch(authNotifierProvider).user;
@@ -19,30 +19,19 @@ final activePunchSessionProvider =
       return response;
     });
 
-// 2. Punch Audit List Provider
-// 2. Punch Audit List Provider (Filtered by User Role)
+// 2. Punch Audit List Provider (Strictly Self-View for Everyone)
 final punchAuditListProvider =
     FutureProvider.autoDispose<List<Map<String, dynamic>>>((ref) async {
       final user = ref.watch(authNotifierProvider).user;
       if (user == null) return [];
 
-      var query = SupabaseService.client
+      // Privacy rule: Whether Operator or Supervisor, you only see your own punch attendance
+      final response = await SupabaseService.client
           .from('attendance')
-          .select('*, stations(name), profiles(full_name)');
-
-      // Operators only see their own punch records; supervisors/admins see all
-      if (user.role == 'operator') {
-        query = query.eq('operator_id', user.id);
-      } else {
-        query = query.eq(
-          'org_id',
-          user.orgId ?? '00000000-0000-0000-0000-000000000001',
-        );
-      }
-
-      final response = await query
+          .select('*, stations(name), profiles(full_name)')
+          .eq('operator_id', user.id)
           .order('created_at', ascending: false)
-          .limit(30);
+          .limit(50);
 
       return List<Map<String, dynamic>>.from(response as List);
     });

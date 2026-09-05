@@ -109,14 +109,14 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
         );
       }
 
-      // Check registered face embedding with calibrated tolerance
+      // Check registered face embedding
       if (user.faceEmbedding != null && user.faceEmbedding!.isNotEmpty) {
         final similarity = _faceService.compareEmbeddings(
           liveEmbedding,
           user.faceEmbedding!,
         );
 
-        if (similarity < 0.55) {
+        if (similarity < 0.50) {
           throw Exception(
             'Face does not match registered profile! Please look straight at the camera.',
           );
@@ -147,19 +147,14 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
         ref.invalidate(punchAuditListProvider);
 
         if (mounted) {
-          final isPresent = data['status'] == 'present';
           final msg = widget.isPunchIn
-              ? 'Punch In Verified (${data['distance']}m) — ON DUTY'
-              : (isPresent
-                    ? 'Duty Completed! Marked PRESENT.'
-                    : 'Incomplete Duty (<7h 50m). Marked ABSENT (₹0)');
+              ? 'Punch In Verified — ON DUTY'
+              : 'Punch Out Verified — Marked PRESENT';
 
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(msg),
-              backgroundColor: widget.isPunchIn || isPresent
-                  ? const Color(0xFF059669)
-                  : Colors.redAccent,
+              backgroundColor: const Color(0xFF059669),
               duration: const Duration(seconds: 4),
             ),
           );
@@ -272,20 +267,15 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
           : Stack(
               fit: StackFit.expand,
               children: [
-                // Camera Preview
                 Center(
                   child: AspectRatio(
                     aspectRatio: 1 / _cameraController!.value.aspectRatio,
                     child: CameraPreview(_cameraController!),
                   ),
                 ),
-
-                // Clear Cutout Oval Overlay: Dark Outside, 100% Clear Inside
                 const Positioned.fill(
                   child: CustomPaint(painter: OvalCutoutOverlayPainter()),
                 ),
-
-                // Top Station Geofence Tag
                 Positioned(
                   top: 20,
                   left: 0,
@@ -323,8 +313,6 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
                     ),
                   ),
                 ),
-
-                // Bottom-Anchored Punch Button
                 Positioned(
                   bottom: 36,
                   left: 28,
@@ -375,7 +363,6 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
   }
 }
 
-/// Custom painter that tints the outside of the oval while keeping the inside crystal clear
 class OvalCutoutOverlayPainter extends CustomPainter {
   const OvalCutoutOverlayPainter();
 
@@ -389,13 +376,10 @@ class OvalCutoutOverlayPainter extends CustomPainter {
       height: ovalHeight,
     );
 
-    // Full screen background path
     final backgroundPath = Path()
       ..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
-    // Cutout oval path
     final ovalPath = Path()..addOval(rect);
 
-    // Combine paths to punch out the transparent center
     final overlayPath = Path.combine(
       PathOperation.difference,
       backgroundPath,
@@ -408,7 +392,6 @@ class OvalCutoutOverlayPainter extends CustomPainter {
 
     canvas.drawPath(overlayPath, overlayPaint);
 
-    // Green oval outline
     final strokePaint = Paint()
       ..color = const Color(0xFF22C55E)
       ..style = PaintingStyle.stroke
