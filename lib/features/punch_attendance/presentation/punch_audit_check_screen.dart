@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
 import 'package:metro_shift_roster/features/punch_attendance/presentation/attendance_provider.dart';
 import 'package:metro_shift_roster/features/punch_attendance/presentation/face_punch_screen.dart';
@@ -21,38 +20,7 @@ class PunchAuditCheckScreen extends ConsumerWidget {
     final user = ref.read(authNotifierProvider).user;
     if (user == null) return;
 
-    final isSupervisorOrAdmin =
-        user.role == 'supervisor' || user.role == 'admin';
-
-    // Check if operator is assigned a shift today before allowing punch-in
-    // SUPERVISORS ARE EXEMPTED: Can punch in/out anytime without an assigned shift
-    if (isPunchIn && !isSupervisorOrAdmin) {
-      try {
-        final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
-        final assigned = await SupabaseService.client
-            .from('shift_assignments')
-            .select('id, shifts!inner(duty_date)')
-            .eq('operator_id', user.id)
-            .eq('shifts.duty_date', todayStr)
-            .limit(1);
-
-        if ((assigned as List).isEmpty) {
-          if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'No duty assigned for today! Attendance will be marked ABSENT.',
-                ),
-                backgroundColor: Colors.redAccent,
-              ),
-            );
-          }
-          return;
-        }
-      } catch (_) {}
-    }
-
-    // Await station list to avoid null reference on initial tap
+    // Await station list
     List<StationModel> stations = ref.read(stationsListProvider).value ?? [];
     if (stations.isEmpty) {
       stations = await ref.read(stationsListProvider.future);
@@ -63,7 +31,7 @@ class PunchAuditCheckScreen extends ConsumerWidget {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'No stations registered. Please create a station first.',
+              'No stations registered. Please contact your supervisor.',
             ),
             backgroundColor: Colors.redAccent,
           ),
@@ -72,23 +40,26 @@ class PunchAuditCheckScreen extends ConsumerWidget {
       return;
     }
 
-    // Select nearest station using cached coordinates
+    // Automatically locate nearest station based on device coordinates
     StationModel targetStation = stations.first;
     try {
-      final cachedPos = await Geolocator.getLastKnownPosition();
-      if (cachedPos != null) {
-        double minDistance = double.infinity;
-        for (final stn in stations) {
-          final d = Geolocator.distanceBetween(
-            cachedPos.latitude,
-            cachedPos.longitude,
-            stn.latitude,
-            stn.longitude,
-          );
-          if (d < minDistance) {
-            minDistance = d;
-            targetStation = stn;
-          }
+      Position? currentPos = await Geolocator.getLastKnownPosition();
+      currentPos ??= await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 3),
+      );
+
+      double minDistance = double.infinity;
+      for (final stn in stations) {
+        final d = Geolocator.distanceBetween(
+          currentPos.latitude,
+          currentPos.longitude,
+          stn.latitude,
+          stn.longitude,
+        );
+        if (d < minDistance) {
+          minDistance = d;
+          targetStation = stn;
         }
       }
     } catch (_) {}
@@ -107,28 +78,40 @@ class PunchAuditCheckScreen extends ConsumerWidget {
     }
   }
 
-  /// Explicit status resolution:
-  /// - Both punches recorded & duration >= 28200s -> PRESENT
-  /// - Punch In recorded & Punch Out null -> ON DUTY
-  /// - Any incomplete/premature/missing punches -> ABSENT
   Widget _buildStatusChip(Map<String, dynamic> record) {
     final statusRaw = (record['status'] ?? '').toString().toLowerCase();
-    final punchIn = record['punch_in_time'];
-    final punchOut = record['punch_out_time'];
-    final durationSeconds =
+    final punchInStr = record['punch_in_time'] ?? record['punch_in_at'];
+    final punchOutStr = record['punch_out_time'] ?? record['punch_out_at'];
+
+    final punchIn = punchInStr != null
+        ? DateTime.tryParse(punchInStr.toString())
+        : null;
+    final punchOut = punchOutStr != null
+        ? DateTime.tryParse(punchOutStr.toString())
+        : null;
+
+    int durationSeconds =
         (record['duty_duration_seconds'] as num?)?.toInt() ?? 0;
+    if (durationSeconds == 0 && punchIn != null && punchOut != null) {
+      durationSeconds = punchOut.difference(punchIn).inSeconds;
+    }
 
     String label;
     Color bg;
     Color fg;
 
-    if (punchIn != null && punchOut == null) {
-      // Active ongoing duty
+    if (statusRaw == 'auto_absent') {
+      // The server has already closed this forgotten punch-in.
+      // Never interpret a null punch_out_at as ON DUTY for auto_absent.
+      label = 'ABSENT';
+      bg = const Color(0xFFFEF2F2);
+      fg = const Color(0xFFDC2626);
+    } else if (punchIn != null && punchOut == null) {
       label = 'ON DUTY';
       bg = const Color(0xFFEFF6FF);
       fg = const Color(0xFF1E3A8A);
     } else if (punchIn != null && punchOut != null) {
-      // Shift completed -> Verify 7h 50m threshold (28,200s)
+      // Must be >= 7 hours 50 minutes (28,200 seconds)
       if (statusRaw == 'present' || durationSeconds >= 28200) {
         label = 'PRESENT';
         bg = const Color(0xFFECFDF5);
@@ -139,7 +122,6 @@ class PunchAuditCheckScreen extends ConsumerWidget {
         fg = const Color(0xFFDC2626);
       }
     } else {
-      // Unassigned, missed in or missed out
       label = 'ABSENT';
       bg = const Color(0xFFFEF2F2);
       fg = const Color(0xFFDC2626);
@@ -168,6 +150,8 @@ class PunchAuditCheckScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final auditAsync = ref.watch(punchAuditListProvider);
     final activeSessionAsync = ref.watch(activePunchSessionProvider);
+    final isAlreadyCompleted =
+        ref.watch(hasCompletedPunchTodayProvider).value ?? false;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -180,7 +164,21 @@ class PunchAuditCheckScreen extends ConsumerWidget {
             // Active Shift Card
             activeSessionAsync.when(
               data: (activeSession) {
-                final isPunchedIn = activeSession != null;
+                // Only a session explicitly marked in_progress is active.
+                // auto_absent sessions are already closed by the database
+                // finalizer and must never be shown as ON DUTY.
+                final activeStatus = activeSession?['status']
+                    ?.toString()
+                    .toLowerCase();
+                final activePunchOut = activeSession?['punch_out_at'] ??
+                    activeSession?['punch_out_time'];
+                final isClosedStatus = activeStatus == 'auto_absent' ||
+                    activeStatus == 'completed' ||
+                    activeStatus == 'rejected';
+                final isPunchedIn = activeSession != null &&
+                    activePunchOut == null &&
+                    !isClosedStatus;
+
 
                 DateTime? punchInTime;
                 if (isPunchedIn && activeSession['punch_in_time'] != null) {
@@ -252,8 +250,8 @@ class PunchAuditCheckScreen extends ConsumerWidget {
                                   ),
                                   Text(
                                     isPunchedIn
-                                        ? 'Shift active • Minimum 7h 50m required'
-                                        : 'Ready for duty punch in',
+                                        ? 'Shift active • Night-shift auto date calculated'
+                                        : 'Ready for duty punch in (Assigned / Unassigned)',
                                     style: TextStyle(
                                       fontSize: 12,
                                       color: Colors.grey.shade600,
@@ -320,33 +318,67 @@ class PunchAuditCheckScreen extends ConsumerWidget {
                           ),
                         ],
                         const SizedBox(height: 18),
-                        ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: isPunchedIn
-                                ? const Color(0xFFD97706)
-                                : const Color(0xFF1E3A8A),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
+                        if (isAlreadyCompleted && !isPunchedIn)
+                          Container(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFDCFCE7),
                               borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: const Color(0xFF86EFAC),
+                              ),
                             ),
-                            elevation: 2,
-                          ),
-                          icon: const Icon(Icons.camera_alt_rounded, size: 20),
-                          label: Text(
-                            isPunchedIn ? 'Face Punch Out' : 'Face Punch In',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
+                            child: const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.check_circle_rounded,
+                                  color: Color(0xFF16A34A),
+                                  size: 18,
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  "Today's Shift Completed (1 Duty Recorded)",
+                                  style: TextStyle(
+                                    color: Color(0xFF166534),
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        else
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: isPunchedIn
+                                  ? const Color(0xFFD97706)
+                                  : const Color(0xFF1E3A8A),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 2,
+                            ),
+                            icon: const Icon(
+                              Icons.camera_alt_rounded,
+                              size: 20,
+                            ),
+                            label: Text(
+                              isPunchedIn ? 'Face Punch Out' : 'Face Punch In',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15,
+                              ),
+                            ),
+                            onPressed: () => _handleAutoNearestPunch(
+                              context,
+                              ref,
+                              !isPunchedIn,
+                              activeSession?['id']?.toString(),
                             ),
                           ),
-                          onPressed: () => _handleAutoNearestPunch(
-                            context,
-                            ref,
-                            !isPunchedIn,
-                            activeSession?['id']?.toString(),
-                          ),
-                        ),
                       ],
                     ),
                   ),
@@ -431,6 +463,11 @@ class PunchAuditCheckScreen extends ConsumerWidget {
                       );
                     }
 
+                    final statusRaw = (s['status'] ?? '')
+                        .toString()
+                        .toLowerCase();
+                    final isAutoAbsent = statusRaw == 'auto_absent';
+
                     return Container(
                       decoration: BoxDecoration(
                         color: Colors.white,
@@ -483,12 +520,14 @@ class PunchAuditCheckScreen extends ConsumerWidget {
                                     ),
                                   ),
                                   Text(
-                                    'Out: ${outTime != null ? timeFormat.format(outTime.toLocal()) : "In Progress"}',
+                                    'Out: ${outTime != null ? timeFormat.format(outTime.toLocal()) : (isAutoAbsent ? "Auto Closed" : "In Progress")}',
                                     style: TextStyle(
                                       fontSize: 11.5,
                                       color: outTime != null
                                           ? Colors.grey.shade600
-                                          : const Color(0xFFD97706),
+                                          : (isAutoAbsent
+                                                ? const Color(0xFFDC2626)
+                                                : const Color(0xFFD97706)),
                                       fontWeight: outTime != null
                                           ? FontWeight.normal
                                           : FontWeight.bold,

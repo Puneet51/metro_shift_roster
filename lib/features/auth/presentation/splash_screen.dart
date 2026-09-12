@@ -94,29 +94,18 @@ class _SplashScreenState extends State<SplashScreen> {
 
 Future<bool> checkAppVersion(BuildContext context) async {
   if (kIsWeb) {
-    debugPrint(
-      '[VERSION CHECK] Skipping version check for web browser environment',
-    );
     return false;
   }
 
   try {
     final String platformName = Platform.isIOS ? 'ios' : 'android';
-    debugPrint('--- [VERSION CHECK START] ---');
-    debugPrint('Checking version for platform: $platformName');
-
     final res = await Supabase.instance.client
         .from('app_versions')
         .select()
         .eq('platform', platformName)
         .maybeSingle();
 
-    debugPrint('DB Response: $res');
-
     if (res == null) {
-      debugPrint(
-        '[VERSION CHECK] No version config found for platform: $platformName',
-      );
       return false;
     }
 
@@ -138,12 +127,7 @@ Future<bool> checkAppVersion(BuildContext context) async {
     final String currentVer = packageInfo.version;
 
     final bool needsUpdate = isVersionOlder(currentVer, minVer);
-    debugPrint(
-      'Current Installed: $currentVer | Target Min: $minVer | Force: $force | NeedsUpdate: $needsUpdate',
-    );
-
     if (force && needsUpdate) {
-      debugPrint('[VERSION CHECK] Mandatory update triggered! Navigating...');
       if (context.mounted) {
         Navigator.pushAndRemoveUntil(
           context,
@@ -156,10 +140,10 @@ Future<bool> checkAppVersion(BuildContext context) async {
       }
       return true;
     }
-  } catch (e, stack) {
-    debugPrint('[VERSION CHECK ERROR]: $e');
-    debugPrint('[VERSION CHECK STACK]: $stack');
+  } catch (_) {
+    return false;
   }
+
   return false;
 }
 

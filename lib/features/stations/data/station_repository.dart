@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:uuid/uuid.dart';
 import 'station_model.dart';
@@ -8,11 +7,12 @@ class StationRepository {
 
   StationRepository(this._client);
 
-  /// Dynamically fetches stations strictly matching the requesting supervisor
+  /// Dynamically fetches stations for operators, supervisors, and admins
   Future<List<StationModel>> getStations(
     String orgId, {
-    required String supervisorId,
-    required bool isAdmin,
+    String? supervisorId,
+    bool isAdmin = false,
+    bool isOperator = false,
   }) async {
     try {
       var query = _client
@@ -25,7 +25,6 @@ class StationRepository {
         code,
         latitude,
         longitude,
-        punch_radius_meters,
         default_fixed_amount,
         shift_templates,
         is_active,
@@ -39,22 +38,38 @@ class StationRepository {
       ''')
           .eq('is_active', true);
 
-      // Strict dynamic check: Non-admins only see stations matching their own supervisor ID
-      if (!isAdmin) {
-        if (supervisorId.isEmpty) return [];
-        query = query.eq('supervisor_id', supervisorId);
+      // If user is a supervisor (not admin, not operator), filter to their stations
+      if (!isAdmin && !isOperator) {
+        if (supervisorId == null || supervisorId.isEmpty || orgId.isEmpty) {
+          return [];
+        }
+
+        // Primary supervisors and relievers use the same effective
+        // supervisor scope. Never broaden this query to the whole org.
+        query = query.eq('org_id', orgId).eq('supervisor_id', supervisorId);
+      } else if (isOperator) {
+        // Operators see only stations owned by their effective supervisor.
+        if (supervisorId == null || supervisorId.isEmpty || orgId.isEmpty) {
+          return [];
+        }
+        query = query.eq('org_id', orgId).eq('supervisor_id', supervisorId);
+      } else if (orgId.isNotEmpty) {
+        // Admins may see active stations in their organization.
+        query = query.eq('org_id', orgId);
+      } else {
+        return [];
       }
 
       final res = await query.order('name', ascending: true);
-
-      return (res as List)
+      final list = (res as List)
           .map<StationModel>(
             (map) =>
                 StationModel.fromMap(Map<String, dynamic>.from(map as Map)),
           )
           .toList();
-    } catch (e, st) {
-      debugPrint('❌ [GET STATIONS ERROR]: $e\n$st');
+
+      return list;
+    } catch (e) {
       return [];
     }
   }
@@ -67,7 +82,6 @@ class StationRepository {
     required String name,
     required double latitude,
     required double longitude,
-    required int punchRadius,
     required double fixedAmount,
     required List<String> tomSystems,
     required List<Map<String, String>> shiftTemplates,
@@ -88,7 +102,6 @@ class StationRepository {
         'code': code,
         'latitude': latitude,
         'longitude': longitude,
-        'punch_radius_meters': punchRadius,
         'default_fixed_amount': fixedAmount,
         'shift_templates': shiftTemplates,
         'is_active': true,
@@ -97,39 +110,119 @@ class StationRepository {
       if (isNew) {
         await _client.from('stations').insert(data);
       } else {
-        await _client.from('stations').update(data).eq('id', targetId);
+        var updateQuery = _client
+            .from('stations')
+            .update(data)
+            .eq('id', targetId)
+            .eq('org_id', orgId)
+            .eq('supervisor_id', supervisorId);
+
+        await updateQuery;
       }
 
-      await _client
+      // Preserve existing operating-system IDs. Deleting/recreating these
+      // rows used to cascade/remove shift assignments whenever a station was
+      // edited (for example, when adding a new shift template). Existing
+      // duties must remain assigned until the supervisor manually changes
+      // them.
+      final existingSystemsRes = await _client
           .from('station_operating_systems')
-          .delete()
+          .select('id, system_name, is_active')
           .eq('station_id', targetId);
+      final existingSystems = (existingSystemsRes as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      final byName = <String, Map<String, dynamic>>{
+        for (final row in existingSystems)
+          (row['system_name']?.toString().trim().toLowerCase() ?? ''): row,
+      };
+      final desiredNames = tomSystems
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+      final desiredKeys = desiredNames.map((s) => s.toLowerCase()).toSet();
 
-      if (tomSystems.isNotEmpty) {
-        final systemsToInsert = tomSystems
-            .map(
-              (sys) => {
-                'id': const Uuid().v4(),
-                'station_id': targetId,
-                'system_name': sys.trim(),
-                'is_active': true,
-              },
-            )
-            .toList();
+      await Future.wait(desiredNames.map((name) async {
+        final key = name.toLowerCase();
+        final existing = byName[key];
+        if (existing != null) {
+          await _client
+              .from('station_operating_systems')
+              .update({'system_name': name, 'is_active': true})
+              .eq('id', existing['id']);
+        } else {
+          await _client.from('station_operating_systems').insert({
+            'id': const Uuid().v4(),
+            'station_id': targetId,
+            'system_name': name,
+            'is_active': true,
+          });
+        }
+      }));
 
-        await _client.from('station_operating_systems').insert(systemsToInsert);
-      }
-    } catch (e, st) {
-      debugPrint('❌ [SAVE STATION ERROR]: $e\n$st');
+      // Do not delete a system that is referenced by an existing shift
+      // assignment. Keep it inactive instead so historical/current duties
+      // retain their operator assignment.
+      await Future.wait(existingSystems.map((row) async {
+        final name = row['system_name']?.toString().trim().toLowerCase() ?? '';
+        if (name.isEmpty || desiredKeys.contains(name)) return;
+        final id = row['id']?.toString();
+        if (id == null || id.isEmpty) return;
+        final refs = await _client
+            .from('shift_assignments')
+            .select('id')
+            .eq('operating_system_id', id)
+            .limit(1);
+        if ((refs as List).isNotEmpty) {
+          await _client
+              .from('station_operating_systems')
+              .update({'is_active': false})
+              .eq('id', id);
+        } else {
+          await _client
+              .from('station_operating_systems')
+              .delete()
+              .eq('id', id);
+        }
+      }));
+    } catch (e) {
       rethrow;
     }
   }
 
-  Future<void> deleteStation(String stationId) async {
+  Future<void> deleteStation({
+    required String stationId,
+    required String orgId,
+    required String supervisorId,
+  }) async {
+    if (orgId.isEmpty || supervisorId.isEmpty) {
+      throw Exception('No supervisor scope available');
+    }
+
+    // Only delete child systems after confirming the station belongs to
+    // this supervisor and organization.
+    final station = await _client
+        .from('stations')
+        .select('id')
+        .eq('id', stationId)
+        .eq('org_id', orgId)
+        .eq('supervisor_id', supervisorId)
+        .maybeSingle();
+
+    if (station == null) {
+      throw Exception('Station not found in your supervisor scope');
+    }
+
     await _client
         .from('station_operating_systems')
         .delete()
         .eq('station_id', stationId);
-    await _client.from('stations').delete().eq('id', stationId);
+
+    await _client
+        .from('stations')
+        .delete()
+        .eq('id', stationId)
+        .eq('org_id', orgId)
+        .eq('supervisor_id', supervisorId);
   }
 }

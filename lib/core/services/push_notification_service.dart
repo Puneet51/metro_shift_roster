@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -86,9 +85,7 @@ class PushNotificationService {
           );
         }
       });
-    } catch (e) {
-      debugPrint('PushNotificationService initialization error: $e');
-    }
+    } catch (e) {}
   }
 
   /// Syncs the device's FCM push token to the user's Supabase profile
@@ -117,8 +114,6 @@ class PushNotificationService {
               .eq('id', userId);
         } catch (_) {}
       });
-    } catch (e) {
-      debugPrint('FCM Token sync skipped/failed: $e');
-    }
+    } catch (e) {}
   }
 }

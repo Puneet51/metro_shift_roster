@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:metro_shift_roster/features/reports/presentation/form_t_excel_generator.dart';
 import 'station_provider.dart';
 import 'create_edit_station_screen.dart';
 
@@ -12,41 +11,6 @@ class StationsListScreen extends ConsumerStatefulWidget {
 }
 
 class _StationsListScreenState extends ConsumerState<StationsListScreen> {
-  String? _downloadingStationId;
-
-  Future<void> _exportStationReport(
-    String stationId,
-    String stationName,
-  ) async {
-    setState(() => _downloadingStationId = stationId);
-    try {
-      await FormTExcelGenerator.generateAndDownloadExcel(
-        stationId: stationId,
-        stationName: stationName,
-        selectedMonth: DateTime.now(),
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text("Form 'T' downloaded for $stationName"),
-            backgroundColor: const Color(0xFF059669),
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to generate report: $e'),
-            backgroundColor: Colors.redAccent,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _downloadingStationId = null);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final stationsAsync = ref.watch(stationsListProvider);
@@ -107,7 +71,6 @@ class _StationsListScreenState extends ConsumerState<StationsListScreen> {
               itemCount: stations.length,
               itemBuilder: (context, idx) {
                 final s = stations[idx];
-                final isDownloading = _downloadingStationId == s.id;
 
                 return Container(
                   margin: const EdgeInsets.only(bottom: 10),
@@ -158,7 +121,7 @@ class _StationsListScreenState extends ConsumerState<StationsListScreen> {
                                       ),
                                     ),
                                     Text(
-                                      'Geofence: ${s.punchRadiusMeters}m radius',
+                                      'Duty station',
                                       style: TextStyle(
                                         fontSize: 12,
                                         color: Colors.grey.shade600,
@@ -171,26 +134,6 @@ class _StationsListScreenState extends ConsumerState<StationsListScreen> {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                IconButton(
-                                  tooltip: "Download Form 'T' Excel",
-                                  icon: isDownloading
-                                      ? const SizedBox(
-                                          width: 18,
-                                          height: 18,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Color(0xFF059669),
-                                          ),
-                                        )
-                                      : const Icon(
-                                          Icons.file_download_outlined,
-                                          color: Color(0xFF059669),
-                                        ),
-                                  onPressed: isDownloading
-                                      ? null
-                                      : () =>
-                                            _exportStationReport(s.id, s.name),
-                                ),
                                 IconButton(
                                   tooltip: 'Edit Station',
                                   icon: const Icon(

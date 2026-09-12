@@ -88,9 +88,55 @@ final pastPublishedShiftsProvider =
       }
 
       final res = await query.order('duty_date', ascending: false);
-      return (res as List<dynamic>)
-          .map((e) => e as Map<String, dynamic>)
+      final shifts = (res as List<dynamic>)
+          .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
+
+      // Load authoritative attendance for the same month and merge it into
+      // each assigned staff member by operator + duty date + shift.
+      final attendanceRes = await SupabaseService.client
+          .from('attendance')
+          .select('operator_id, duty_date, shift_id, status')
+          .eq('org_id', orgId)
+          .gte('duty_date', startStr)
+          .lt('duty_date', DateFormat('yyyy-MM-dd').format(nextMonth));
+
+      final attendanceByKey = <String, String>{};
+      for (final row in attendanceRes as List<dynamic>) {
+        final data = row as Map<String, dynamic>;
+        final operatorId = data['operator_id']?.toString();
+        final dutyDate = data['duty_date']?.toString();
+        final shiftId = data['shift_id']?.toString();
+        if (operatorId == null ||
+            operatorId.isEmpty ||
+            dutyDate == null ||
+            dutyDate.isEmpty) {
+          continue;
+        }
+
+        final key = '$operatorId|$dutyDate|${shiftId ?? ''}';
+        attendanceByKey[key] = (data['status'] ?? 'absent')
+            .toString()
+            .toLowerCase();
+      }
+
+      for (final shift in shifts) {
+        final shiftId = shift['id']?.toString() ?? '';
+        final dutyDate = shift['duty_date']?.toString() ?? '';
+        final assignments =
+            (shift['shift_assignments'] as List<dynamic>?) ?? [];
+
+        for (final assignment in assignments) {
+          final a = assignment as Map<String, dynamic>;
+          final profile = a['profiles'] as Map<String, dynamic>?;
+          final operatorId = profile?['id']?.toString() ?? '';
+          final key = '$operatorId|$dutyDate|$shiftId';
+
+          a['attendance_status'] = attendanceByKey[key] ?? 'absent';
+        }
+      }
+
+      return shifts;
     });
 
 class PunchHistoryScreen extends ConsumerStatefulWidget {
@@ -120,9 +166,23 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
 
   Future<void> _exportExcel() async {
     final filter = ref.read(historyFilterProvider);
+    final user = ref.read(authNotifierProvider).user;
     final stations = ref.read(stationsListProvider).value ?? [];
 
-    String stationName = 'All_Stations';
+    if (filter.selectedStationId == 'all') {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Please select a station before downloading attendance.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    String stationName = 'Selected_Station';
     if (filter.selectedStationId != 'all') {
       final matched = stations.where((s) => s.id == filter.selectedStationId);
       if (matched.isNotEmpty) {
@@ -136,6 +196,7 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
         stationId: filter.selectedStationId,
         stationName: stationName,
         selectedMonth: filter.selectedMonth,
+        operatorId: user?.role == 'operator' ? user?.id : null,
       );
 
       if (mounted) {
@@ -257,6 +318,11 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                           return DropdownButtonFormField<String>(
                             isDense: true,
                             decoration: InputDecoration(
+                              hintText: 'Select Station',
+                              hintStyle: const TextStyle(
+                                fontSize: 12.5,
+                                color: Color(0xFF64748B),
+                              ),
                               contentPadding: const EdgeInsets.symmetric(
                                 horizontal: 10,
                                 vertical: 7,
@@ -276,15 +342,10 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                                 ),
                               ),
                             ),
-                            value: filter.selectedStationId,
+                            value: filter.selectedStationId == 'all'
+                                ? null
+                                : filter.selectedStationId,
                             items: [
-                              const DropdownMenuItem(
-                                value: 'all',
-                                child: Text(
-                                  'All Stations',
-                                  style: TextStyle(fontSize: 12.5),
-                                ),
-                              ),
                               ...stations.map(
                                 (s) => DropdownMenuItem(
                                   value: s.id,
@@ -329,7 +390,7 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                       ),
                       orElse: () => const SizedBox(),
                     ),
-                    if (isSupervisor)
+                    if (user != null)
                       ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF059669),
@@ -359,7 +420,10 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                             fontWeight: FontWeight.bold,
                           ),
                         ),
-                        onPressed: _isDownloading ? null : _exportExcel,
+                        onPressed:
+                            _isDownloading || filter.selectedStationId == 'all'
+                            ? null
+                            : _exportExcel,
                       ),
                   ],
                 ),
@@ -491,6 +555,14 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                                       system?['system_name'] ?? 'TOM Counter';
                                   final isOt = a['is_ot'] == true;
                                   final isCurrentUser = user?.id == opId;
+                                  final attendanceStatus =
+                                      (a['attendance_status'] ?? 'absent')
+                                          .toString()
+                                          .toLowerCase();
+                                  final isPresent =
+                                      attendanceStatus == 'present';
+                                  final isWeekOff =
+                                      attendanceStatus == 'week_off';
 
                                   return Container(
                                     margin: const EdgeInsets.symmetric(
@@ -536,7 +608,38 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                                             ),
                                           ),
                                         ),
-                                        if (isOt)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: isPresent
+                                                ? const Color(0xFF059669)
+                                                : (isWeekOff
+                                                      ? const Color(0xFFD97706)
+                                                      : const Color(
+                                                          0xFFDC2626,
+                                                        )),
+                                            borderRadius: BorderRadius.circular(
+                                              4,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            isPresent
+                                                ? 'PRESENT'
+                                                : (isWeekOff
+                                                      ? 'WEEK OFF'
+                                                      : 'ABSENT'),
+                                            style: const TextStyle(
+                                              fontSize: 9.5,
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                        if (isOt) ...[
+                                          const SizedBox(width: 5),
                                           Container(
                                             padding: const EdgeInsets.symmetric(
                                               horizontal: 6,
@@ -556,6 +659,7 @@ class _PunchHistoryScreenState extends ConsumerState<PunchHistoryScreen> {
                                               ),
                                             ),
                                           ),
+                                        ],
                                       ],
                                     ),
                                   );

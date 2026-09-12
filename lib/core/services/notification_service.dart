@@ -7,14 +7,15 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
 
   static Future<void> init() async {
-    const androidSettings =
-        AndroidInitializationSettings('@mipmap/launcher_icon');
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/launcher_icon',
+    );
     const initSettings = InitializationSettings(android: androidSettings);
 
     await _localPlugin.initialize(initSettings);
   }
 
-  /// Show instant banner notification
+  /// Show instant banner notification (Kept available if needed manually)
   static Future<void> showLocalNotification({
     required int id,
     required String title,
@@ -24,7 +25,7 @@ class NotificationService {
       'metro_shift_channel',
       'Shift & Duty Alerts',
       channelDescription:
-          'Notifications for shift assignments, punch updates, and rosters',
+          'Notifications for shift assignments and rosters',
       importance: Importance.max,
       priority: Priority.high,
       playSound: true,
@@ -35,6 +36,7 @@ class NotificationService {
   }
 
   /// Realtime Stream to listen for user notifications from Supabase
+  /// (Local notification popup removed here to prevent duplication with FCM)
   static RealtimeChannel subscribeToUserNotifications(
     String userId,
     Function(Map<String, dynamic>) onNewNotification,
@@ -52,14 +54,11 @@ class NotificationService {
           ),
           callback: (payload) {
             final newRecord = payload.newRecord;
-            showLocalNotification(
-              id: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-              title: newRecord['title'] ?? 'Metro Shift Alert',
-              body:
-                  newRecord['body'] ?? 'You have a new update in your roster.',
-            );
+            // Duplicate showLocalNotification call removed.
+            // FCM (PushNotificationService) will handle displaying the alert card.
             onNewNotification(newRecord);
           },
-        )..subscribe();
+        )
+      ..subscribe();
   }
 }

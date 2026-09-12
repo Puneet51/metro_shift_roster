@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:metro_shift_roster/core/utils/display_formatters.dart';
+import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../data/operator_model.dart';
 import 'staff_provider.dart';
 import 'add_edit_operator_screen.dart';
 
@@ -14,6 +18,7 @@ class StaffListScreen extends ConsumerStatefulWidget {
 class _StaffListScreenState extends ConsumerState<StaffListScreen> {
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  bool _isResettingPin = false;
 
   @override
   void dispose() {
@@ -29,12 +34,173 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
     }
   }
 
+  void _showPinDialog(String operatorName, String tempPin) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.vpn_key_rounded, color: Color(0xFF059669)),
+            SizedBox(width: 8),
+            Text(
+              'Operator PIN Reset',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Generated 4-digit login PIN for $operatorName:'),
+            const SizedBox(height: 16),
+            Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEFF6FF),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFF3B82F6),
+                    width: 1.5,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SelectableText(
+                      tempPin,
+                      style: const TextStyle(
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 6,
+                        color: Color(0xFF1E3A8A),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton(
+                      icon: const Icon(
+                        Icons.copy_rounded,
+                        color: Color(0xFF1E3A8A),
+                      ),
+                      tooltip: 'Copy PIN',
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: tempPin));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('PIN copied to clipboard'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Share this PIN with the operator. They will enter this PIN and configure their permanent PIN on their next login.',
+              style: TextStyle(fontSize: 12.5, color: Colors.black87),
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF1E3A8A),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Done', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleResetOperatorPin(OperatorModel op) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.vpn_key_rounded, color: Color(0xFFB45309)),
+            SizedBox(width: 8),
+            Text(
+              'Reset Operator PIN',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Text(
+          'Generate a new temporary 4-digit PIN for ${op.fullName}?\n\n'
+          'The temporary PIN will be displayed on screen so you can share it directly with the operator.',
+          style: const TextStyle(fontSize: 14, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF1E3A8A),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Generate PIN',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isResettingPin = true);
+
+    try {
+      final tempPin = await ref
+          .read(authNotifierProvider.notifier)
+          .supervisorResetOperatorPin(op.phoneNumber);
+
+      if (mounted) {
+        _showPinDialog(op.fullName, tempPin);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed to reset PIN: ${e.toString().replaceAll('Exception: ', '')}',
+            ),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isResettingPin = false);
+      }
+    }
+  }
+
   Widget _buildStatutoryTag(
     String label,
-    String value,
+    String? value,
     Color bgColor,
     Color textColor,
   ) {
+    final displayVal = (value != null && value.trim().isNotEmpty)
+        ? (label == 'DOJ' ? formatDisplayDate(value) : value.trim())
+        : '-';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
@@ -50,7 +216,7 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
               text: '$label: ',
               style: const TextStyle(fontWeight: FontWeight.bold),
             ),
-            TextSpan(text: value.isNotEmpty ? value : '-'),
+            TextSpan(text: displayVal),
           ],
         ),
       ),
@@ -72,14 +238,16 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
               final query = _searchQuery.toLowerCase();
               final name = op.fullName.toLowerCase();
               final phone = op.phoneNumber.toLowerCase();
-              final empCode = (op.empCode ?? op.companyId ?? '').toLowerCase();
+              final empCode = (op.empCode ?? '').toLowerCase();
               final bio = (op.biometricId ?? '').toLowerCase();
               final bmrcl = (op.bmrclId ?? '').toLowerCase();
+              final father = (op.fatherName ?? '').toLowerCase();
               return name.contains(query) ||
                   phone.contains(query) ||
                   empCode.contains(query) ||
                   bio.contains(query) ||
-                  bmrcl.contains(query);
+                  bmrcl.contains(query) ||
+                  father.contains(query);
             }).toList();
 
             return Column(
@@ -150,7 +318,7 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
                             setState(() => _searchQuery = val.trim()),
                         decoration: InputDecoration(
                           hintText:
-                              'Search by Name, Phone, Emp Code, Bio ID...',
+                              'Search by Name, Phone, Emp Code, Bio ID, Father...',
                           hintStyle: TextStyle(
                             fontSize: 13,
                             color: Colors.grey.shade500,
@@ -223,13 +391,6 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
                           itemCount: filteredStaff.length,
                           itemBuilder: (context, idx) {
                             final op = filteredStaff[idx];
-                            final empCode = op.empCode ?? op.companyId ?? '-';
-                            final bioId = op.biometricId ?? '-';
-                            final bmrclId = op.bmrclId ?? '-';
-                            final fatherName = op.fatherName ?? '-';
-                            final doj = op.doj ?? '-';
-                            final esi = op.esiNo ?? '-';
-                            final uan = op.uanNo ?? '-';
                             final isFaceReg = op.isFaceRegistered == true;
 
                             return Container(
@@ -341,6 +502,36 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
                                             ],
                                           ),
                                         ),
+                                        OutlinedButton.icon(
+                                          style: OutlinedButton.styleFrom(
+                                            foregroundColor: const Color(
+                                              0xFFB45309,
+                                            ),
+                                            side: const BorderSide(
+                                              color: Color(0xFFF59E0B),
+                                            ),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 4,
+                                            ),
+                                            minimumSize: const Size(0, 32),
+                                          ),
+                                          icon: const Icon(
+                                            Icons.vpn_key_rounded,
+                                            size: 14,
+                                          ),
+                                          label: const Text(
+                                            'PIN',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                          onPressed: _isResettingPin
+                                              ? null
+                                              : () =>
+                                                    _handleResetOperatorPin(op),
+                                        ),
                                         IconButton(
                                           icon: const Icon(
                                             Icons.edit_outlined,
@@ -417,50 +608,51 @@ class _StaffListScreenState extends ConsumerState<StaffListScreen> {
                                     ),
                                     const SizedBox(height: 10),
 
-                                    // Statutory & Identity Details (Matching Form 'T')
+                                    // Statutory & Identity Details (Form 'T' + Machine ID)
+                                    // Statutory & Identity Details (Form 'T')
                                     Wrap(
                                       spacing: 6,
                                       runSpacing: 6,
                                       children: [
                                         _buildStatutoryTag(
                                           'Emp Code',
-                                          empCode,
+                                          op.empCode,
                                           const Color(0xFFEFF6FF),
                                           const Color(0xFF1E3A8A),
                                         ),
                                         _buildStatutoryTag(
                                           'Bio ID',
-                                          bioId,
+                                          op.biometricId,
                                           const Color(0xFFFAF5FF),
                                           const Color(0xFF7C3AED),
                                         ),
                                         _buildStatutoryTag(
                                           'BMRCL',
-                                          bmrclId,
+                                          op.bmrclId,
                                           const Color(0xFFF0FDF4),
                                           const Color(0xFF15803D),
                                         ),
                                         _buildStatutoryTag(
-                                          "Father",
-                                          fatherName,
+                                          'Father',
+                                          op.fatherName,
                                           const Color(0xFFFFFBEB),
                                           const Color(0xFFB45309),
                                         ),
                                         _buildStatutoryTag(
                                           'DOJ',
-                                          doj,
+                                          op.doj,
                                           const Color(0xFFF1F5F9),
                                           const Color(0xFF334155),
                                         ),
                                         _buildStatutoryTag(
                                           'ESI',
-                                          esi,
+                                          op.esiNo,
                                           const Color(0xFFF1F5F9),
                                           const Color(0xFF475569),
                                         ),
                                         _buildStatutoryTag(
                                           'UAN',
-                                          uan,
+                                          op.uanNo,
                                           const Color(0xFFF1F5F9),
                                           const Color(0xFF475569),
                                         ),

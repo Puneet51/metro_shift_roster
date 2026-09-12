@@ -1,52 +1,27 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uuid/uuid.dart';
 
 class AdminRepository {
   final SupabaseClient _client;
 
   AdminRepository(this._client);
 
+  /// Fetches supervisors with specific staff counts and nested relievers
   Future<List<Map<String, dynamic>>> getSupervisors(String orgId) async {
-    try {
-      final res = await _client.rpc(
-        'get_org_supervisors_overview',
-        params: {'p_org_id': orgId},
-      );
-      if (res != null && res is List) {
-        return res
-            .map((e) => Map<String, dynamic>.from(e as Map))
-            .where((e) => e['role'] == 'supervisor')
-            .toList();
-      }
-    } catch (_) {
-      final fallbackRes = await _client
-          .from('profiles')
-          .select()
-          .eq('role', 'supervisor')
-          .order('full_name', ascending: true);
+    final res = await _client.rpc(
+      'get_org_supervisors_overview',
+      params: orgId.isNotEmpty ? {'p_org_id': orgId} : {},
+    );
 
-      final totalStations =
-          (await _client.from('stations').select('id') as List).length;
-      final totalOperators =
-          (await _client
-                      .from('profiles')
-                      .select('id')
-                      .eq('role', 'tom_operator')
-                  as List)
-              .length;
-
-      final List<Map<String, dynamic>> list = [];
-      for (final row in fallbackRes as List) {
-        final r = Map<String, dynamic>.from(row as Map<String, dynamic>);
-        r['total_stations'] = totalStations;
-        r['total_operators'] = totalOperators;
-        list.add(r);
-      }
-      return list;
+    if (res is! List) {
+      throw Exception('Invalid supervisor overview response');
     }
-    return [];
+
+    return res
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
   }
 
+  /// Creates a supervisor with a strictly 4-digit temporary PIN and pre-provisions auth.users
   Future<void> addSupervisor({
     required String orgId,
     required String fullName,
@@ -55,34 +30,62 @@ class AdminRepository {
   }) async {
     final cleanPhone = phoneNumber.replaceAll(RegExp(r'\D'), '').trim();
 
-    try {
-      final res = await _client.rpc(
-        'create_native_staff_member',
-        params: {
-          'p_full_name': fullName.trim(),
-          'p_phone_number': cleanPhone,
-          'p_role': 'supervisor',
-          if (orgId.isNotEmpty) 'p_org_id': orgId,
-        },
-      );
+    final res = await _client.rpc(
+      'create_native_supervisor',
+      params: {
+        'p_full_name': fullName.trim(),
+        'p_phone_number': cleanPhone,
+        if (orgId.isNotEmpty) 'p_org_id': orgId,
+      },
+    );
 
-      final data = res as Map<String, dynamic>;
-      if (data['success'] != true) {
-        throw Exception(data['error'] ?? 'Failed to register supervisor');
-      }
-    } catch (_) {
-      await _client.from('profiles').insert({
-        'id': const Uuid().v4(),
-        'org_id': orgId,
-        'role': 'supervisor',
-        'full_name': fullName.trim(),
-        'phone_number': cleanPhone,
-        'email': email?.trim(),
-        'pin_hash': '1234',
-        'has_pin': true,
-        'is_active': true,
-      });
+    final data = res as Map<String, dynamic>;
+
+    if (data['success'] != true) {
+      throw Exception(data['error'] ?? 'Failed to register supervisor');
     }
+  }
+
+  /// Adds a dedicated reliever linked to a primary supervisor with pre-provisioned auth.users
+  Future<void> addSupervisorReliever({
+    required String supervisorId,
+    required String fullName,
+    required String phoneNumber,
+  }) async {
+    final cleanPhone = phoneNumber.replaceAll(RegExp(r'\D'), '').trim();
+
+    final res = await _client.rpc(
+      'add_supervisor_reliever',
+      params: {
+        'p_supervisor_id': supervisorId,
+        'p_full_name': fullName.trim(),
+        'p_phone_number': cleanPhone,
+      },
+    );
+
+    final data = res as Map<String, dynamic>;
+
+    if (data['success'] != true) {
+      throw Exception(data['error'] ?? 'Failed to add reliever');
+    }
+  }
+
+  /// Admin-managed PIN Reset (Returns 4-digit temporary PIN)
+  Future<String> adminGenerateAndSendSupervisorPin({
+    required String supervisorId,
+    required String adminId,
+  }) async {
+    final res = await _client.rpc(
+      'admin_reset_supervisor_pin',
+      params: {'p_supervisor_id': supervisorId, 'p_admin_id': adminId},
+    );
+
+    final result = res as Map<String, dynamic>;
+    if (result['success'] != true) {
+      throw Exception(result['error'] ?? 'Failed to reset supervisor PIN');
+    }
+
+    return result['temp_pin'].toString();
   }
 
   Future<void> updateSupervisor({
@@ -110,15 +113,19 @@ class AdminRepository {
     required String supervisorId,
     required String adminId,
   }) async {
+
     final res = await _client.rpc(
       'delete_supervisor_strict',
       params: {'p_supervisor_id': supervisorId, 'p_admin_id': adminId},
     );
 
     final data = res as Map<String, dynamic>;
+
     if (data['success'] != true) {
       throw Exception(data['error'] ?? 'Failed to delete supervisor');
     }
+
+
   }
 
   Future<void> setAppVersionConfig({

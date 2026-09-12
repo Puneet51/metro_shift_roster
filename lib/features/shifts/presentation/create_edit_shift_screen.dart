@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:metro_shift_roster/core/utils/display_formatters.dart';
 import 'package:metro_shift_roster/features/stations/presentation/station_provider.dart';
 import 'package:metro_shift_roster/features/stations/data/station_model.dart';
 import 'package:metro_shift_roster/features/staff/presentation/staff_provider.dart';
@@ -9,7 +10,16 @@ import 'shift_provider.dart';
 
 class CreateEditShiftScreen extends ConsumerStatefulWidget {
   final String? initialStationId;
-  const CreateEditShiftScreen({super.key, this.initialStationId});
+  final String? initialDutyDate;
+  final String? initialShiftName;
+  final String? initialShiftId;
+  const CreateEditShiftScreen({
+    super.key,
+    this.initialStationId,
+    this.initialDutyDate,
+    this.initialShiftName,
+    this.initialShiftId,
+  });
 
   @override
   ConsumerState<CreateEditShiftScreen> createState() =>
@@ -20,14 +30,23 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
   final _formKey = GlobalKey<FormState>();
   String? _selectedStationId;
   DateTime _selectedDate = DateTime.now();
+  bool get _singleShiftEdit =>
+      widget.initialShiftName != null && widget.initialShiftName!.trim().isNotEmpty;
   bool _isLoadingExisting = false;
   bool _publishAllStations = false;
+  bool _isPublishingRosters = false;
+  String? _singleEditTemplateId;
+  final Map<String, String> _shiftIdsByRosterKey = {};
 
-  // [dateString] -> [stationId] -> [shiftName] -> [operatingSystemId] -> {operator_id, is_ot}
+  // [dateString] -> [stationId] -> [exact template id] -> [operatingSystemId] -> {operator_id, is_ot}
   final Map<String, Map<String, Map<String, Map<String, Map<String, dynamic>>>>>
   _dateRosterTree = {};
 
-  // Latest known assignments per station: [stationId] -> [shiftName] -> [operatingSystemId] -> {operator_id, is_ot}
+  // Persistent excluded/deleted TOM counters per station and exact shift template.
+  // Exact scope key = duty date + station + exact shift template.
+  final Map<String, Set<String>> _excludedSystems = {};
+
+  // Latest known assignments per station and exact shift template.
   final Map<String, Map<String, Map<String, Map<String, dynamic>>>>
   _stationLatestTemplate = {};
 
@@ -35,6 +54,10 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
   void initState() {
     super.initState();
     _selectedStationId = widget.initialStationId;
+    if (widget.initialDutyDate != null) {
+      final parsed = DateTime.tryParse(widget.initialDutyDate!);
+      if (parsed != null) _selectedDate = parsed;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadExistingAssignments();
     });
@@ -62,40 +85,97 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
     return targetDate.isAfter(todayMidnight);
   }
 
+  String _rosterKey(StationShiftTemplate tmpl) =>
+      tmpl.id.isNotEmpty
+          ? tmpl.id
+          : '${tmpl.stationId}|${tmpl.shiftName}|${tmpl.startTime}|${tmpl.endTime}';
+
+  String _rosterScopeKey(String dateKey, String stationId, String templateKey) =>
+      '$dateKey|$stationId|$templateKey';
+
   Future<void> _loadExistingAssignments() async {
     setState(() => _isLoadingExisting = true);
     try {
-      final user = ref.read(authNotifierProvider).user;
-      final orgId = user?.orgId ?? '';
-      final supervisorId = user?.role == 'supervisor'
-          ? (user?.id ?? '')
-          : (user?.effectiveSupervisorId ?? '');
-
-      // Load all shifts across all dates directly without date filter
-      final shifts = await ref
-          .read(shiftRepositoryProvider)
-          .getSupervisorShifts(
-            orgId,
-            supervisorId: supervisorId,
-            dutyDate: null,
-          );
+      // Reuse the already-loaded scoped roster when possible. This avoids
+      // a second full roster request when opening a shift for editing.
+      final shifts = await ref.read(supervisorShiftsProvider.future);
 
       final sortedShifts = List.of(shifts)
-        ..sort((a, b) => a.dutyDate.compareTo(b.dutyDate));
+        ..sort((a, b) {
+          var c = a.dutyDate.compareTo(b.dutyDate);
+          if (c != 0) return c;
+          c = a.stationId.compareTo(b.stationId);
+          if (c != 0) return c;
+          c = a.shiftName.compareTo(b.shiftName);
+          if (c != 0) return c;
+          c = a.startTime.compareTo(b.startTime);
+          if (c != 0) return c;
+          c = a.endTime.compareTo(b.endTime);
+          if (c != 0) return c;
+          return a.id.compareTo(b.id);
+        });
 
       _dateRosterTree.clear();
+      _excludedSystems.clear();
       _stationLatestTemplate.clear();
+      _shiftIdsByRosterKey.clear();
+      _singleEditTemplateId = null;
+
+      final stations = ref.read(stationsListProvider).value ?? [];
 
       for (final s in sortedShifts) {
+        // In single-shift edit mode, keep loading the full day's scoped roster
+        // into _dateRosterTree so operator dropdowns can show where an operator
+        // is already assigned (for example, "Venky (BRCS - B)"). The UI still
+        // limits the visible shift/template to the one being edited via
+        // _getShiftsForStation().
+
+        final station = stations.where((st) => st.id == s.stationId).isNotEmpty
+            ? stations.firstWhere((st) => st.id == s.stationId)
+            : null;
+        if (station == null) continue;
+
+        // Match this DB shift to one exact station template. The occurrence
+        // counter makes duplicate templates with the same name/time distinct.
+        final allTemplates = _getShiftsForStation(station, ignoreSingleEdit: true);
+        final candidates = allTemplates.where((t) =>
+            t.shiftName == s.shiftName &&
+            t.startTime == s.startTime &&
+            t.endTime == s.endTime).toList();
+        String? templateKey;
+        if (s.templateId != null && s.templateId!.isNotEmpty) {
+          final exactTemplate = candidates.where((t) => t.id == s.templateId).toList();
+          if (exactTemplate.isNotEmpty) templateKey = _rosterKey(exactTemplate.first);
+        }
+        if (templateKey == null) {
+          for (final candidate in candidates) {
+            final key = _rosterKey(candidate);
+            final scope = _rosterScopeKey(s.dutyDate, s.stationId, key);
+            if (!_shiftIdsByRosterKey.containsKey(scope)) {
+              templateKey = key;
+              break;
+            }
+          }
+        }
+        templateKey ??= candidates.isNotEmpty ? _rosterKey(candidates.first) : null;
+        if (templateKey == null) continue;
+
+        final scopeKey = _rosterScopeKey(s.dutyDate, s.stationId, templateKey);
+        _shiftIdsByRosterKey[scopeKey] = s.id;
+        if (widget.initialShiftId == s.id) _singleEditTemplateId = templateKey;
+
         _dateRosterTree.putIfAbsent(s.dutyDate, () => {});
         _dateRosterTree[s.dutyDate]!.putIfAbsent(s.stationId, () => {});
         _dateRosterTree[s.dutyDate]![s.stationId]!.putIfAbsent(
-          s.shiftName,
+          templateKey,
           () => {},
         );
 
-        _stationLatestTemplate.putIfAbsent(s.stationId, () => {});
-        _stationLatestTemplate[s.stationId]!.putIfAbsent(s.shiftName, () => {});
+        final selectedDateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+        if (s.dutyDate == selectedDateKey) {
+          _stationLatestTemplate.putIfAbsent(s.stationId, () => {});
+          _stationLatestTemplate[s.stationId]!.putIfAbsent(templateKey, () => {});
+        }
 
         for (final a in s.assignments) {
           if (a.operatorId.isNotEmpty) {
@@ -103,21 +183,16 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
               'operator_id': a.operatorId,
               'is_ot': a.isOt,
             };
-
-            _dateRosterTree[s.dutyDate]![s.stationId]![s.shiftName]![a
-                .operatingSystemId] = Map.from(
-              assignmentData,
-            );
-
-            _stationLatestTemplate[s.stationId]![s.shiftName]![a
-                .operatingSystemId] = Map.from(
-              assignmentData,
-            );
+            _dateRosterTree[s.dutyDate]![s.stationId]![templateKey]![a
+                .operatingSystemId] = Map.from(assignmentData);
+            if (s.dutyDate == selectedDateKey) {
+              _stationLatestTemplate[s.stationId]![templateKey]![a
+                  .operatingSystemId] = Map.from(assignmentData);
+            }
           }
         }
       }
 
-      final stations = ref.read(stationsListProvider).value ?? [];
       for (final stn in stations) {
         _initStationRoster(stn);
       }
@@ -125,58 +200,75 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
       if (_selectedStationId == null && stations.isNotEmpty) {
         _selectedStationId = stations.first.id;
       }
-    } catch (e) {
-      debugPrint('❌ Error loading shift assignments: $e');
+    } catch (_) {
     }
     if (mounted) {
       setState(() => _isLoadingExisting = false);
     }
   }
 
-  List<StationShiftTemplate> _getShiftsForStation(StationModel stn) {
+  List<StationShiftTemplate> _getShiftsForStation(StationModel stn, {bool ignoreSingleEdit = false}) {
+    List<StationShiftTemplate> templates;
     if (stn.shiftTemplates.isNotEmpty) {
-      return stn.shiftTemplates;
+      templates = List.from(stn.shiftTemplates);
+    } else {
+      final suffix = stn.id.length >= 12
+          ? stn.id.substring(stn.id.length - 12)
+          : stn.id.padLeft(12, '0');
+      templates = [
+        StationShiftTemplate(
+          id: '00000000-0000-0000-0001-$suffix',
+          stationId: stn.id,
+          shiftName: 'A Shift',
+          startTime: '06:00:00',
+          endTime: '14:00:00',
+        ),
+        StationShiftTemplate(
+          id: '00000000-0000-0000-0002-$suffix',
+          stationId: stn.id,
+          shiftName: 'B Shift',
+          startTime: '14:00:00',
+          endTime: '22:00:00',
+        ),
+      ];
     }
-    final suffix = stn.id.length >= 12
-        ? stn.id.substring(stn.id.length - 12)
-        : stn.id.padLeft(12, '0');
-    return [
-      StationShiftTemplate(
-        id: '00000000-0000-0000-0001-$suffix',
-        stationId: stn.id,
-        shiftName: 'A Shift',
-        startTime: '06:00:00',
-        endTime: '14:00:00',
-      ),
-      StationShiftTemplate(
-        id: '00000000-0000-0000-0002-$suffix',
-        stationId: stn.id,
-        shiftName: 'B Shift',
-        startTime: '14:00:00',
-        endTime: '22:00:00',
-      ),
-    ];
+    templates.sort((a, b) {
+      final comp = a.startTime.compareTo(b.startTime);
+      return comp != 0 ? comp : a.shiftName.compareTo(b.shiftName);
+    });
+    if (_singleShiftEdit && !ignoreSingleEdit) {
+      if (_singleEditTemplateId != null) {
+        templates = templates.where((t) => _rosterKey(t) == _singleEditTemplateId).toList();
+      } else {
+        templates = templates.where((t) => t.shiftName == widget.initialShiftName).toList();
+      }
+    }
+    return templates;
   }
 
   List<StationOperatingSystemModel> _getSystemsForStation(StationModel stn) {
+    List<StationOperatingSystemModel> systems;
     if (stn.operatingSystems.isNotEmpty) {
-      return stn.operatingSystems;
+      systems = List.from(stn.operatingSystems);
+    } else {
+      final suffix = stn.id.length >= 12
+          ? stn.id.substring(stn.id.length - 12)
+          : stn.id.padLeft(12, '0');
+      systems = [
+        StationOperatingSystemModel(
+          id: '00000000-0000-0000-0001-$suffix',
+          stationId: stn.id,
+          systemName: 'TOM 01',
+        ),
+        StationOperatingSystemModel(
+          id: '00000000-0000-0000-0002-$suffix',
+          stationId: stn.id,
+          systemName: 'TOM 02',
+        ),
+      ];
     }
-    final suffix = stn.id.length >= 12
-        ? stn.id.substring(stn.id.length - 12)
-        : stn.id.padLeft(12, '0');
-    return [
-      StationOperatingSystemModel(
-        id: '00000000-0000-0000-0001-$suffix',
-        stationId: stn.id,
-        systemName: 'TOM 01',
-      ),
-      StationOperatingSystemModel(
-        id: '00000000-0000-0000-0002-$suffix',
-        stationId: stn.id,
-        systemName: 'TOM 02',
-      ),
-    ];
+    systems.sort((a, b) => a.systemName.compareTo(b.systemName));
+    return systems;
   }
 
   void _initStationRoster(StationModel stn) {
@@ -188,28 +280,21 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
     final systems = _getSystemsForStation(stn);
 
     for (final tmpl in shifts) {
-      _dateRosterTree[dateKey]![stn.id]!.putIfAbsent(tmpl.shiftName, () => {});
+      final rosterKey = _rosterKey(tmpl);
+      _dateRosterTree[dateKey]![stn.id]!.putIfAbsent(rosterKey, () => {});
 
       for (int i = 0; i < systems.length; i++) {
         final sys = systems[i];
         final existing =
-            _dateRosterTree[dateKey]![stn.id]![tmpl.shiftName]?[sys.id];
+            _dateRosterTree[dateKey]![stn.id]![rosterKey]?[sys.id];
 
         if (existing == null) {
-          var fallback =
-              _stationLatestTemplate[stn.id]?[tmpl.shiftName]?[sys.id];
-
-          if (fallback == null &&
-              _stationLatestTemplate[stn.id]?[tmpl.shiftName] != null) {
-            final latestMap = _stationLatestTemplate[stn.id]![tmpl.shiftName]!;
-            if (i < latestMap.values.length) {
-              fallback = latestMap.values.elementAt(i);
-            }
-          }
-
-          _dateRosterTree[dateKey]![stn.id]![tmpl.shiftName]![sys.id] = {
-            'operator_id': fallback?['operator_id'],
-            'is_ot': fallback?['is_ot'] ?? false,
+          // An unassigned counter must stay unassigned. Never carry an
+          // operator from another date/shift merely because the time is the
+          // same. Assignments belong to one exact station + shift + TOM.
+          _dateRosterTree[dateKey]![stn.id]![rosterKey]![sys.id] = {
+            'operator_id': null,
+            'is_ot': false,
           };
         }
       }
@@ -219,11 +304,27 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
   void _onDateChanged(DateTime newDate) {
     setState(() {
       _selectedDate = newDate;
+      _stationLatestTemplate.clear();
     });
 
+    final dateKey = DateFormat('yyyy-MM-dd').format(newDate);
     final stations = ref.read(stationsListProvider).value ?? [];
     for (final stn in stations) {
       _initStationRoster(stn);
+      final shifts = _dateRosterTree[dateKey]?[stn.id] ?? {};
+      for (final entry in shifts.entries) {
+        final cache = <String, Map<String, dynamic>>{};
+        for (final sysEntry in entry.value.entries) {
+          final data = sysEntry.value;
+          if (data['operator_id'] != null && data['operator_id'].toString().isNotEmpty) {
+            cache[sysEntry.key] = Map<String, dynamic>.from(data);
+          }
+        }
+        if (cache.isNotEmpty) {
+          _stationLatestTemplate.putIfAbsent(stn.id, () => {});
+          _stationLatestTemplate[stn.id]![entry.key] = cache;
+        }
+      }
     }
   }
 
@@ -232,7 +333,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
     required String dateKey,
     required List<StationModel> allStations,
     required String currentStationId,
-    required String currentShiftName,
+    required String currentShiftKey,
     required String currentSysId,
   }) {
     final dayRosters = _dateRosterTree[dateKey];
@@ -254,13 +355,13 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
           final opId = counterEntry.value['operator_id'];
 
           if (stnId == currentStationId &&
-              shiftName == currentShiftName &&
+              shiftName == currentShiftKey &&
               sysId == currentSysId) {
             continue;
           }
 
           if (opId == operatorId) {
-            return '$stnName - $shiftName';
+            return '$stnName - ${shiftName == currentShiftKey ? 'Current shift' : 'Other shift'}';
           }
         }
       }
@@ -269,6 +370,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
   }
 
   Future<void> _publishRosters() async {
+    if (_isPublishingRosters) return;
     if (_isPastDate) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -283,8 +385,8 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
 
     final stations = ref.read(stationsListProvider).value ?? [];
     final formattedDate = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    if (mounted) setState(() => _isPublishingRosters = true);
 
-    // Filter by single selected station OR all stations depending on checkbox
     final targetStations = _publishAllStations
         ? stations
         : stations.where((s) => s.id == _selectedStationId).toList();
@@ -296,6 +398,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
           backgroundColor: Colors.orange,
         ),
       );
+      if (mounted) setState(() => _isPublishingRosters = false);
       return;
     }
 
@@ -307,12 +410,12 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
           backgroundColor: Colors.orange,
         ),
       );
+      if (mounted) setState(() => _isPublishingRosters = false);
       return;
     }
 
     bool hasPublishedAny = false;
-
-    final List<Future<void>> publishTasks = [];
+    final List<Future<void> Function()> publishTasks = [];
 
     for (final stn in targetStations) {
       final stationRosters = dateRosters[stn.id];
@@ -321,11 +424,17 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
       final shifts = _getShiftsForStation(stn);
 
       for (final tmpl in shifts) {
-        final shiftAssignments = stationRosters[tmpl.shiftName];
+        final rosterKey = _rosterKey(tmpl);
+        final shiftAssignments = stationRosters[rosterKey];
         if (shiftAssignments == null) continue;
 
+        final excludedSet = _excludedSystems[_rosterScopeKey(formattedDate, stn.id, rosterKey)] ?? <String>{};
+
         final List<Map<String, dynamic>> rawAssignments = [];
+        final List<String> clearedSystemIds = [];
         shiftAssignments.forEach((sysId, data) {
+          if (excludedSet.contains(sysId)) return;
+
           final opId = data['operator_id'];
           if (opId != null && opId.toString().trim().isNotEmpty) {
             rawAssignments.add({
@@ -336,37 +445,46 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
 
             _stationLatestTemplate.putIfAbsent(stn.id, () => {});
             _stationLatestTemplate[stn.id]!.putIfAbsent(
-              tmpl.shiftName,
+              rosterKey,
               () => {},
             );
-            _stationLatestTemplate[stn.id]![tmpl.shiftName]![sysId] = {
+            _stationLatestTemplate[stn.id]![rosterKey]![sysId] = {
               'operator_id': opId,
               'is_ot': data['is_ot'] ?? false,
             };
+          } else {
+            // Explicitly unassign this TOM from THIS shift only.
+            clearedSystemIds.add(sysId);
           }
         });
 
-        if (rawAssignments.isNotEmpty) {
+        if (rawAssignments.isNotEmpty ||
+            clearedSystemIds.isNotEmpty ||
+            excludedSet.isNotEmpty) {
           hasPublishedAny = true;
-          publishTasks.add(
-            ref
+          publishTasks.add(() => ref
                 .read(shiftActionNotifierProvider.notifier)
                 .publishShift(
                   stationId: stn.id,
                   shiftName: tmpl.shiftName,
+                  templateId: tmpl.id.isNotEmpty ? tmpl.id : null,
                   dutyDate: formattedDate,
                   startTime: tmpl.startTime,
                   endTime: tmpl.endTime,
                   dailyAmount: stn.defaultFixedAmount,
                   rawAssignments: rawAssignments,
-                ),
-          );
+                  existingShiftId: _shiftIdsByRosterKey[_rosterScopeKey(formattedDate, stn.id, rosterKey)],
+                  clearedOperatingSystemIds: clearedSystemIds,
+                  removedOperatingSystemIds: excludedSet.toList(),
+                ));
         }
       }
     }
 
     if (publishTasks.isNotEmpty) {
-      await Future.wait(publishTasks);
+      // Publish independent station/shift writes concurrently. The previous
+      // sequential loop made multi-shift publishing unnecessarily slow.
+      await Future.wait(publishTasks.map((task) => task()));
     }
 
     if (!hasPublishedAny) {
@@ -374,12 +492,13 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'Please assign at least one staff member before publishing.',
+              'Please assign at least one staff member to an active counter before publishing.',
             ),
             backgroundColor: Colors.orange,
           ),
         );
       }
+      if (mounted) setState(() => _isPublishingRosters = false);
       return;
     }
 
@@ -396,7 +515,10 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
           backgroundColor: const Color(0xFF059669),
         ),
       );
+      if (mounted) setState(() => _isPublishingRosters = false);
       Navigator.pop(context, formattedDate);
+    } else if (mounted) {
+      setState(() => _isPublishingRosters = false);
     }
   }
 
@@ -428,9 +550,8 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Dynamic Date Card with Highlighting
                     Container(
-                      padding: const EdgeInsets.all(14),
+                      padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
                         color: _isFutureDate
                             ? const Color(0xFFF0FDF4)
@@ -446,85 +567,88 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                         ),
                       ),
                       child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Row(
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  color: _isFutureDate
-                                      ? const Color(0xFFDCFCE7)
-                                      : const Color(0xFFEFF6FF),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Icon(
-                                  Icons.calendar_today_rounded,
-                                  color: _isFutureDate
-                                      ? const Color(0xFF16A34A)
-                                      : const Color(0xFF1E3A8A),
-                                  size: 20,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      const Text(
-                                        'Roster Duty Date',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontSize: 14.5,
-                                          color: Color(0xFF0F172A),
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: _isFutureDate
+                                  ? const Color(0xFFDCFCE7)
+                                  : const Color(0xFFEFF6FF),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Icon(
+                              Icons.calendar_today_rounded,
+                              color: _isFutureDate
+                                  ? const Color(0xFF16A34A)
+                                  : const Color(0xFF1E3A8A),
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Wrap(
+                                  crossAxisAlignment: WrapCrossAlignment.center,
+                                  spacing: 6,
+                                  runSpacing: 2,
+                                  children: [
+                                    const Text(
+                                      'Roster Duty Date',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                        color: Color(0xFF0F172A),
+                                      ),
+                                    ),
+                                    if (_isFutureDate)
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF16A34A),
+                                          borderRadius: BorderRadius.circular(
+                                            4,
+                                          ),
+                                        ),
+                                        child: const Text(
+                                          'Upcoming Date',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.bold,
+                                          ),
                                         ),
                                       ),
-                                      if (_isFutureDate) ...[
-                                        const SizedBox(width: 6),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 6,
-                                            vertical: 2,
-                                          ),
-                                          decoration: BoxDecoration(
-                                            color: const Color(0xFF16A34A),
-                                            borderRadius: BorderRadius.circular(
-                                              4,
-                                            ),
-                                          ),
-                                          child: const Text(
-                                            'Upcoming Date',
-                                            style: TextStyle(
-                                              fontSize: 10,
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ],
+                                  ],
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  DateFormat(
+                                    'EEEE, dd MMM yyyy',
+                                  ).format(_selectedDate),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: _isPastDate
+                                        ? Colors.red.shade700
+                                        : (_isFutureDate
+                                              ? const Color(0xFF15803D)
+                                              : Colors.grey.shade600),
+                                    fontWeight: (_isPastDate || _isFutureDate)
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
+                                    fontSize: 12.5,
                                   ),
-                                  Text(
-                                    DateFormat(
-                                      'EEEE, dd MMM yyyy',
-                                    ).format(_selectedDate),
-                                    style: TextStyle(
-                                      color: _isPastDate
-                                          ? Colors.red.shade700
-                                          : (_isFutureDate
-                                                ? const Color(0xFF15803D)
-                                                : Colors.grey.shade600),
-                                      fontWeight: (_isPastDate || _isFutureDate)
-                                          ? FontWeight.bold
-                                          : FontWeight.normal,
-                                      fontSize: 12.5,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ],
+                                ),
+                              ],
+                            ),
                           ),
+                          const SizedBox(width: 8),
                           OutlinedButton(
                             style: OutlinedButton.styleFrom(
                               side: BorderSide(
@@ -532,11 +656,17 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                     ? const Color(0xFF16A34A)
                                     : const Color(0xFF1E3A8A),
                               ),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8),
                               ),
                             ),
-                            onPressed: () async {
+                            onPressed: _singleShiftEdit ? null : () async {
                               final picked = await showDatePicker(
                                 context: context,
                                 initialDate: _selectedDate,
@@ -551,14 +681,22 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                 _onDateChanged(picked);
                               }
                             },
-                            child: const Text('Change Date'),
+                            child: Text(
+                              'Change Date',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: _isFutureDate
+                                    ? const Color(0xFF16A34A)
+                                    : const Color(0xFF1E3A8A),
+                              ),
+                            ),
                           ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 12),
 
-                    // Past Date Block Banner
                     if (_isPastDate)
                       Container(
                         padding: const EdgeInsets.all(12),
@@ -639,7 +777,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                     ),
                                   )
                                   .toList(),
-                              onChanged: (id) {
+                              onChanged: _singleShiftEdit ? null : (id) {
                                 if (id != null) {
                                   final stn = stations.firstWhere(
                                     (s) => s.id == id,
@@ -653,7 +791,6 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                             ),
                             const SizedBox(height: 12),
 
-                            // Checkbox for publishing single station vs all stations
                             Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 10,
@@ -683,7 +820,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                 ),
                                 subtitle: Text(
                                   _publishAllStations
-                                      ? 'Will publish duties for all ${stations.length} stations on ${DateFormat('dd MMM').format(_selectedDate)}'
+                                      ? 'Will publish duties for all ${stations.length} stations on ${DateFormat('dd/MM/yyyy').format(_selectedDate)}'
                                       : 'Only publishing duty roster for ${currentStation.name}',
                                   style: const TextStyle(fontSize: 11.5),
                                 ),
@@ -730,6 +867,21 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                   itemCount: shifts.length,
                                   itemBuilder: (ctx, shiftIdx) {
                                     final tmpl = shifts[shiftIdx];
+                                    final rosterKey = _rosterKey(tmpl);
+
+                                    final excludedSet =
+                                        _excludedSystems[_rosterScopeKey(
+                                          dateKey,
+                                          currentStation.id,
+                                          rosterKey,
+                                        )] ??
+                                        <String>{};
+                                    final deletedSystems = systems
+                                        .where(
+                                          (s) => excludedSet.contains(s.id),
+                                        )
+                                        .toList();
+
                                     return Container(
                                       margin: const EdgeInsets.only(bottom: 12),
                                       decoration: BoxDecoration(
@@ -774,7 +926,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                         ),
                                                   ),
                                                   child: Text(
-                                                    '${tmpl.startTime} - ${tmpl.endTime}',
+                                                    '${formatDisplayTime(tmpl.startTime)} - ${formatDisplayTime(tmpl.endTime)}',
                                                     style: const TextStyle(
                                                       fontSize: 11.5,
                                                       fontWeight:
@@ -789,10 +941,12 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                               height: 18,
                                               color: Color(0xFFF1F5F9),
                                             ),
-                                            ...systems.map((sys) {
+                                            ...systems.where((s) => !excludedSet.contains(s.id)).map((
+                                              sys,
+                                            ) {
                                               final curData =
                                                   _dateRosterTree[dateKey]?[currentStation
-                                                      .id]?[tmpl.shiftName]?[sys
+                                                      .id]?[rosterKey]?[sys
                                                       .id];
                                               final assignedOpId =
                                                   curData?['operator_id'];
@@ -804,14 +958,99 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                     ),
                                                 child: Row(
                                                   children: [
+                                                    // Cross Delete Icon beside TOM
+                                                    InkWell(
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            14,
+                                                          ),
+                                                      onTap: _isPastDate
+                                                          ? null
+                                                          : () {
+                                                              setState(() {
+                                                                final scopeKey = _rosterScopeKey(
+                                                                  dateKey,
+                                                                  currentStation.id,
+                                                                  rosterKey,
+                                                                );
+                                                                _excludedSystems
+                                                                    .putIfAbsent(
+                                                                  scopeKey,
+                                                                  () => <String>{},
+                                                                )
+                                                                    .add(sys.id);
+
+                                                                // Preserve the current
+                                                                // assignment so Restore TOM
+                                                                // can put the same operator
+                                                                // back automatically.
+                                                                final currentAssignment =
+                                                                    _dateRosterTree[dateKey]?[currentStation
+                                                                        .id]?[rosterKey]?[sys
+                                                                        .id];
+
+                                                                _stationLatestTemplate
+                                                                    .putIfAbsent(
+                                                                      currentStation
+                                                                          .id,
+                                                                      () => {},
+                                                                    );
+                                                                _stationLatestTemplate[currentStation
+                                                                        .id]!
+                                                                    .putIfAbsent(
+                                                                      rosterKey,
+                                                                      () => {},
+                                                                    );
+                                                                _stationLatestTemplate[currentStation
+                                                                    .id]![rosterKey]![sys
+                                                                    .id] = {
+                                                                  'operator_id':
+                                                                      currentAssignment?['operator_id'],
+                                                                  'is_ot':
+                                                                      currentAssignment?['is_ot'] ??
+                                                                      false,
+                                                                };
+
+                                                                _dateRosterTree[dateKey]?[currentStation
+                                                                        .id]?[rosterKey]?[sys
+                                                                        .id]?['operator_id'] =
+                                                                    null;
+                                                              });
+                                                            },
+                                                      child: Container(
+                                                        padding:
+                                                            const EdgeInsets.all(
+                                                              4,
+                                                            ),
+                                                        margin:
+                                                            const EdgeInsets.only(
+                                                              right: 4,
+                                                            ),
+                                                        decoration:
+                                                            BoxDecoration(
+                                                              color: Colors
+                                                                  .red
+                                                                  .shade50,
+                                                              shape: BoxShape
+                                                                  .circle,
+                                                            ),
+                                                        child: Icon(
+                                                          Icons.close_rounded,
+                                                          color: Colors
+                                                              .red
+                                                              .shade600,
+                                                          size: 15,
+                                                        ),
+                                                      ),
+                                                    ),
                                                     SizedBox(
-                                                      width: 85,
+                                                      width: 58,
                                                       child: Text(
                                                         sys.systemName,
                                                         style: const TextStyle(
                                                           fontWeight:
                                                               FontWeight.bold,
-                                                          fontSize: 12.5,
+                                                          fontSize: 12,
                                                           color: Color(
                                                             0xFF334155,
                                                           ),
@@ -822,11 +1061,12 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                     ),
                                                     Expanded(
                                                       child: DropdownButtonFormField<String>(
+                                                        isExpanded: true,
                                                         isDense: true,
                                                         decoration: const InputDecoration(
                                                           contentPadding:
                                                               EdgeInsets.symmetric(
-                                                                horizontal: 10,
+                                                                horizontal: 6,
                                                                 vertical: 8,
                                                               ),
                                                           border:
@@ -840,7 +1080,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                         hint: const Text(
                                                           '-- Unassigned --',
                                                           style: TextStyle(
-                                                            fontSize: 12,
+                                                            fontSize: 11.5,
                                                           ),
                                                         ),
                                                         items: [
@@ -849,7 +1089,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                             child: Text(
                                                               '-- Unassigned --',
                                                               style: TextStyle(
-                                                                fontSize: 12,
+                                                                fontSize: 11.5,
                                                               ),
                                                             ),
                                                           ),
@@ -865,8 +1105,8 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                   currentStationId:
                                                                       currentStation
                                                                           .id,
-                                                                  currentShiftName:
-                                                                      tmpl.shiftName,
+                                                                  currentShiftKey:
+                                                                      rosterKey,
                                                                   currentSysId:
                                                                       sys.id,
                                                                 );
@@ -882,8 +1122,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                     ? '${s.fullName} ($assignedInfo)'
                                                                     : s.fullName,
                                                                 style: TextStyle(
-                                                                  fontSize:
-                                                                      12.5,
+                                                                  fontSize: 12,
                                                                   color:
                                                                       isAssignedElsewhere
                                                                       ? const Color(
@@ -911,8 +1150,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                             : (val) {
                                                                 setState(() {
                                                                   _dateRosterTree[dateKey]![currentStation
-                                                                          .id]![tmpl
-                                                                          .shiftName]![sys
+                                                                          .id]![rosterKey]![sys
                                                                           .id]!['operator_id'] =
                                                                       val;
                                                                   _stationLatestTemplate
@@ -925,13 +1163,12 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                   _stationLatestTemplate[currentStation
                                                                           .id]!
                                                                       .putIfAbsent(
-                                                                        tmpl.shiftName,
+                                                                        rosterKey,
                                                                         () =>
                                                                             {},
                                                                       );
                                                                   _stationLatestTemplate[currentStation
-                                                                      .id]![tmpl
-                                                                      .shiftName]![sys
+                                                                      .id]![rosterKey]![sys
                                                                       .id] = {
                                                                     'operator_id':
                                                                         val,
@@ -943,7 +1180,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                               },
                                                       ),
                                                     ),
-                                                    const SizedBox(width: 8),
+                                                    const SizedBox(width: 6),
                                                     InkWell(
                                                       onTap: _isPastDate
                                                           ? null
@@ -955,8 +1192,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                 final updatedOt =
                                                                     !cur;
                                                                 _dateRosterTree[dateKey]![currentStation
-                                                                        .id]![tmpl
-                                                                        .shiftName]![sys
+                                                                        .id]![rosterKey]![sys
                                                                         .id]!['is_ot'] =
                                                                     updatedOt;
 
@@ -969,12 +1205,11 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                 _stationLatestTemplate[currentStation
                                                                         .id]!
                                                                     .putIfAbsent(
-                                                                      tmpl.shiftName,
+                                                                      rosterKey,
                                                                       () => {},
                                                                     );
                                                                 _stationLatestTemplate[currentStation
-                                                                    .id]![tmpl
-                                                                    .shiftName]![sys
+                                                                    .id]![rosterKey]![sys
                                                                     .id] = {
                                                                   'operator_id':
                                                                       assignedOpId,
@@ -986,7 +1221,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                       child: Container(
                                                         padding:
                                                             const EdgeInsets.symmetric(
-                                                              horizontal: 9,
+                                                              horizontal: 8,
                                                               vertical: 6,
                                                             ),
                                                         decoration: BoxDecoration(
@@ -1036,6 +1271,80 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                 ),
                                               );
                                             }),
+
+                                            // "+ Recover TOM" Action chips for deleted counters
+                                            if (deletedSystems.isNotEmpty &&
+                                                !_isPastDate)
+                                              Padding(
+                                                padding: const EdgeInsets.only(
+                                                  top: 8.0,
+                                                ),
+                                                child: Wrap(
+                                                  spacing: 8,
+                                                  children: deletedSystems.map((
+                                                    dSys,
+                                                  ) {
+                                                    return ActionChip(
+                                                      avatar: const Icon(
+                                                        Icons.add_rounded,
+                                                        size: 16,
+                                                        color: Color(
+                                                          0xFF1E3A8A,
+                                                        ),
+                                                      ),
+                                                      label: Text(
+                                                        'Restore ${dSys.systemName}',
+                                                        style: const TextStyle(
+                                                          fontSize: 11.5,
+                                                          fontWeight:
+                                                              FontWeight.w600,
+                                                          color: Color(
+                                                            0xFF1E3A8A,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                      backgroundColor:
+                                                          const Color(
+                                                            0xFFEFF6FF,
+                                                          ),
+                                                      side: const BorderSide(
+                                                        color: Color(
+                                                          0xFFBFDBFE,
+                                                        ),
+                                                      ),
+                                                      onPressed: () {
+                                                        setState(() {
+                                                          // Restore only the TOM that the
+                                                          // supervisor explicitly deleted.
+                                                          _excludedSystems[_rosterScopeKey(
+                                                                  dateKey,
+                                                                  currentStation.id,
+                                                                  rosterKey,
+                                                                )]
+                                                              ?.remove(dSys.id);
+
+                                                          // Restore its previous operator
+                                                          // assignment, if one was saved.
+                                                          final previousAssignment =
+                                                              _stationLatestTemplate[currentStation
+                                                                  .id]?[rosterKey]?[dSys
+                                                                  .id];
+
+                                                          _dateRosterTree[dateKey]![currentStation
+                                                              .id]![rosterKey]![dSys
+                                                              .id] = {
+                                                            'operator_id':
+                                                                previousAssignment?['operator_id'],
+                                                            'is_ot':
+                                                                previousAssignment?['is_ot'] ??
+                                                                false,
+                                                          };
+                                                        });
+                                                      },
+                                                    );
+                                                  }).toList(),
+                                                ),
+                                              ),
                                           ],
                                         ),
                                       ),
@@ -1087,7 +1396,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                             ? Icons.done_all_rounded
                             : Icons.send_rounded,
                       ),
-                      onPressed: (_isPastDate || actionState.isLoading)
+                      onPressed: (_isPastDate || actionState.isLoading || _isPublishingRosters)
                           ? null
                           : _publishRosters,
                       label: actionState.isLoading

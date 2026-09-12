@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:camera/camera.dart';
@@ -8,6 +9,8 @@ import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart
 import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/core/services/face_biometric_service.dart';
 import 'package:metro_shift_roster/features/reports/presentation/form_t_excel_generator.dart';
+import 'package:metro_shift_roster/features/stations/presentation/station_provider.dart';
+import 'package:metro_shift_roster/features/attendance/data/attendance_repository.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
   const ProfileScreen({super.key});
@@ -27,17 +30,27 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
   late final TextEditingController _esiController;
   late final TextEditingController _uanController;
 
+  // Supervisor PIN Generator Tab Controller
+  final _operatorPhoneController = TextEditingController();
+  bool _isGeneratingPin = false;
+
   bool _isSaving = false;
   bool _isExporting = false;
   List<dynamic> _personalAttendance = [];
   bool _isLoadingAttendance = false;
   bool _isLoadingProfile = false;
+  String? _selectedExportStationId;
+  Timer? _attendanceRefreshTimer;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
     final user = ref.read(authNotifierProvider).user;
+    final isSupervisor = user?.role == 'supervisor' || user?.role == 'admin';
+
+    // 3 tabs if supervisor/admin, 2 tabs for operator
+    _tabController = TabController(length: isSupervisor ? 3 : 2, vsync: this);
+
     _nameController = TextEditingController(text: user?.fullName ?? '');
     _bioController = TextEditingController(text: user?.biometricId ?? '');
     _companyController = TextEditingController(
@@ -48,9 +61,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     _esiController = TextEditingController(text: user?.esiNo ?? '');
     _uanController = TextEditingController(text: user?.uanNo ?? '');
 
-    // Refresh fresh profile data and personal attendance on load
     _fetchFreshProfile();
     _fetchAttendanceReport();
+    _attendanceRefreshTimer = Timer.periodic(const Duration(minutes: 1), (_) { _fetchAttendanceReport(); });
   }
 
   Future<void> _fetchFreshProfile() async {
@@ -106,27 +119,113 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
   }
 
   Future<void> _fetchAttendanceReport() async {
-    setState(() => _isLoadingAttendance = true);
+    if (mounted) setState(() => _isLoadingAttendance = true);
     final user = ref.read(authNotifierProvider).user;
-    if (user != null) {
-      final res = await SupabaseService.client
-          .from('attendance')
-          .select('*, stations(name), shifts(shift_name)')
-          .eq('operator_id', user.id)
-          .order('duty_date', ascending: false)
-          .limit(30);
+    if (user == null) {
+      if (mounted) setState(() => _isLoadingAttendance = false);
+      return;
+    }
+    try {
+      final rows = await AttendanceRepository(SupabaseService.client).getMyAttendance(user.id);
+      if (mounted) {
+        setState(() { _personalAttendance = rows; _isLoadingAttendance = false; });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingAttendance = false);
+    }
+  }
+
+  Future<void> _handleSupervisorGeneratePin() async {
+    final phone = _operatorPhoneController.text.trim();
+    if (phone.length < 10) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Please enter a valid 10-digit operator mobile number.',
+          ),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.vpn_key_rounded, color: Color(0xFFB45309)),
+            SizedBox(width: 8),
+            Text(
+              'Generate Operator PIN',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Text(
+          'Generate a new temporary login PIN for operator with phone $phone?\n\n'
+          'The temporary PIN will be dispatched directly to the operator\'s notifications feed. For confidentiality, the PIN is not displayed on your screen.',
+          style: const TextStyle(fontSize: 14, height: 1.4),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF1E3A8A),
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text(
+              'Generate & Send',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isGeneratingPin = true);
+    try {
+      await ref
+          .read(authNotifierProvider.notifier)
+          .supervisorResetOperatorPin(phone);
 
       if (mounted) {
-        setState(() {
-          _personalAttendance = (res as List<dynamic>?) ?? [];
-          _isLoadingAttendance = false;
-        });
+        _operatorPhoneController.clear();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'A new temporary login PIN was successfully generated and sent to $phone\'s notification box.',
+            ),
+            backgroundColor: const Color(0xFF059669),
+            duration: const Duration(seconds: 4),
+          ),
+        );
       }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Failed: ${e.toString().replaceAll('Exception: ', '')}',
+            ),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isGeneratingPin = false);
     }
   }
 
   @override
   void dispose() {
+    _attendanceRefreshTimer?.cancel();
     _tabController.dispose();
     _nameController.dispose();
     _bioController.dispose();
@@ -135,6 +234,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     _fatherController.dispose();
     _esiController.dispose();
     _uanController.dispose();
+    _operatorPhoneController.dispose();
     super.dispose();
   }
 
@@ -202,44 +302,42 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
     }
   }
 
+  String _formatDutyDate(dynamic value) {
+    final d = DateTime.tryParse(value?.toString() ?? '');
+    return d == null ? (value?.toString() ?? '-') : DateFormat('dd/MM/yyyy').format(d);
+  }
+
   Future<void> _exportExcel() async {
     setState(() => _isExporting = true);
     final user = ref.read(authNotifierProvider).user;
     try {
       if (user != null) {
         final isSupervisor = user.role == 'supervisor' || user.role == 'admin';
+        String stationId = 'all';
+        String stationName = isSupervisor ? 'Metro_Station' : 'All_Stations';
+
+        if (!isSupervisor) {
+          final stations = ref.read(stationsListProvider).value ?? [];
+          final selected = stations.where((s) => s.id == _selectedExportStationId).firstOrNull;
+          if (selected == null) {
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a station before downloading Excel.')));
+            return;
+          }
+          stationId = selected.id;
+          stationName = selected.name;
+        } else if (_personalAttendance.isNotEmpty) {
+          final first = _personalAttendance.first;
+          if (first['station_id'] != null) stationId = first['station_id'].toString();
+          if (first['stations'] is Map && first['stations']['name'] != null) stationName = first['stations']['name'].toString();
+        }
 
         await FormTExcelGenerator.generateAndDownloadExcel(
-          stationId:
-              isSupervisor &&
-                  _personalAttendance.isNotEmpty &&
-                  _personalAttendance.first['station_id'] != null
-              ? _personalAttendance.first['station_id']
-              : 'all',
-          stationName:
-              isSupervisor &&
-                  _personalAttendance.isNotEmpty &&
-                  _personalAttendance.first['stations'] != null
-              ? _personalAttendance.first['stations']['name']
-              : (isSupervisor
-                    ? 'Metro_Station'
-                    : (user.fullName.isNotEmpty
-                          ? user.fullName
-                          : 'My_Attendance')),
-          selectedMonth: DateTime.now(),
-          // Operators strictly pass their own ID; supervisors pass null for all staff
+          stationId: stationId, stationName: stationName, selectedMonth: DateTime.now(),
           operatorId: isSupervisor ? null : user.id,
         );
       }
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Export error: $e'),
-            backgroundColor: Colors.redAccent,
-          ),
-        );
-      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export error: $e'), backgroundColor: Colors.redAccent));
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
@@ -248,6 +346,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(authNotifierProvider).user;
+    final isSupervisor = user?.role == 'supervisor' || user?.role == 'admin';
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
@@ -277,15 +376,20 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                 fontWeight: FontWeight.bold,
                 fontSize: 13.5,
               ),
-              tabs: const [
-                Tab(
+              tabs: [
+                const Tab(
                   icon: Icon(Icons.person_rounded, size: 20),
                   text: 'Profile & Face ID',
                 ),
-                Tab(
+                const Tab(
                   icon: Icon(Icons.table_chart_rounded, size: 20),
                   text: 'Attendance Register',
                 ),
+                if (isSupervisor)
+                  const Tab(
+                    icon: Icon(Icons.vpn_key_rounded, size: 20),
+                    text: 'PIN Setup',
+                  ),
               ],
             ),
           ),
@@ -304,7 +408,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Profile Avatar Hero
                       Container(
                         padding: const EdgeInsets.all(18),
                         decoration: BoxDecoration(
@@ -404,7 +507,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                       ),
                       const SizedBox(height: 16),
 
-                      // Statutory Form
                       Container(
                         padding: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
@@ -608,6 +710,27 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
           // TAB 2: Attendance Records & Download
           Column(
             children: [
+              if (!isSupervisor)
+                Container(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                  color: Colors.white,
+                  child: ref.watch(stationsListProvider).when(
+                    loading: () => const InputDecorator(
+                      decoration: InputDecoration(labelText: 'Station for Excel', border: OutlineInputBorder()),
+                      child: Text('Loading stations...'),
+                    ),
+                    error: (_, __) => const InputDecorator(
+                      decoration: InputDecoration(labelText: 'Station for Excel', border: OutlineInputBorder()),
+                      child: Text('Unable to load stations'),
+                    ),
+                    data: (stations) => DropdownButtonFormField<String>(
+                      value: stations.any((s) => s.id == _selectedExportStationId) ? _selectedExportStationId : null,
+                      decoration: const InputDecoration(labelText: 'Station for Excel', border: OutlineInputBorder()),
+                      items: stations.map((s) => DropdownMenuItem<String>(value: s.id, child: Text(s.name, overflow: TextOverflow.ellipsis))).toList(),
+                      onChanged: (value) => setState(() => _selectedExportStationId = value),
+                    ),
+                  ),
+                ),
               Container(
                 padding: const EdgeInsets.all(12.0),
                 color: Colors.white,
@@ -693,6 +816,10 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                             chipBg = const Color(0xFFFEF2F2);
                             chipFg = const Color(0xFFDC2626);
                             chipLabel = 'ABSENT';
+                          } else if (status == 'week_off') {
+                            chipBg = const Color(0xFFFEF3C7);
+                            chipFg = const Color(0xFFD97706);
+                            chipLabel = 'WEEK OFF';
                           } else {
                             chipBg = const Color(0xFFEFF6FF);
                             chipFg = const Color(0xFF1E3A8A);
@@ -720,15 +847,18 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
                                 ),
                               ),
                               title: Text(
-                                '$stn • ${att['duty_date']}',
+                                '$stn • ${_formatDutyDate(att['duty_date'])}',
                                 style: const TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 14,
                                 ),
                               ),
                               subtitle: Text(
-                                'In: ${att['punch_in_time'] != null ? DateFormat('hh:mm a').format(DateTime.parse(att['punch_in_time']).toLocal()) : "—"} | '
-                                'Out: ${att['punch_out_time'] != null ? DateFormat('hh:mm a').format(DateTime.parse(att['punch_out_time']).toLocal()) : "In Progress"}',
+                                status == 'present'
+                                    ? 'Duty assigned'
+                                    : status == 'week_off'
+                                        ? 'No duty — Week Off'
+                                        : 'No duty assigned — Absent',
                                 style: const TextStyle(fontSize: 12),
                               ),
                               trailing: Container(
@@ -756,6 +886,104 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen>
               ),
             ],
           ),
+
+          // TAB 3: Supervisor-Managed PIN Generator Tab
+          if (isSupervisor)
+            SingleChildScrollView(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEFF6FF),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: const Color(0xFFBFDBFE)),
+                    ),
+                    child: const Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.shield_outlined,
+                              color: Color(0xFF1E3A8A),
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Operator PIN Setup & Reset',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1E3A8A),
+                              ),
+                            ),
+                          ],
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          'If an operator forgot their login PIN or requires first-time access, enter their registered mobile number and tap "Generate PIN".\n\n'
+                          'A secure temporary PIN will be created natively and delivered directly to the operator\'s notifications. For privacy, it is never shown here.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFF1E3A8A),
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+
+                  TextFormField(
+                    controller: _operatorPhoneController,
+                    keyboardType: TextInputType.phone,
+                    maxLength: 10,
+                    decoration: const InputDecoration(
+                      labelText: 'Operator Registered Mobile Number',
+                      prefixText: '+91 ',
+                      prefixIcon: Icon(Icons.phone_android),
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1E3A8A),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                    icon: _isGeneratingPin
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          )
+                        : const Icon(Icons.vpn_key_rounded),
+                    label: Text(
+                      _isGeneratingPin
+                          ? 'Generating & Sending PIN...'
+                          : 'Generate PIN',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                    onPressed: _isGeneratingPin
+                        ? null
+                        : _handleSupervisorGeneratePin,
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );

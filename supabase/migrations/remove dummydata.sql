@@ -1,52 +1,149 @@
--- Disable triggers temporarily to prevent foreign key constraint order issues
-SET session_replication_role = 'replica';
+-- ============================================================
+-- METRO SHIFT ROSTER — COMPLETE TEST DATA CLEANUP
+-- ============================================================
+-- Deletes ALL TEST DATA, including admin accounts.
+--
+-- PRESERVES:
+--   - Tables / schema
+--   - RLS policies
+--   - RPC / functions
+--   - Cron jobs
+--   - attendance_status enum including week_off
+--   - PostGIS configuration
+--
+-- WARNING:
+--   This deletes ALL profiles and ALL auth users.
+--   Use ONLY on a disposable/test database.
+-- ============================================================
 
--- 1. Wipe test attendance and punch sessions
+BEGIN;
+
+-- Temporarily disable triggers/foreign-key enforcement
+-- for this cleanup session only.
+SET LOCAL session_replication_role = 'replica';
+
+
+-- ------------------------------------------------------------
+-- 1. Attendance / punch data
+-- ------------------------------------------------------------
+
 TRUNCATE TABLE public.attendance RESTART IDENTITY CASCADE;
 
--- 2. Wipe test shifts and shift assignments
+TRUNCATE TABLE public.punch_sessions RESTART IDENTITY CASCADE;
+
+
+-- ------------------------------------------------------------
+-- 2. Shift / duty data
+-- ------------------------------------------------------------
+
 TRUNCATE TABLE public.shift_assignments RESTART IDENTITY CASCADE;
+
 TRUNCATE TABLE public.shifts RESTART IDENTITY CASCADE;
 
--- 3. Wipe test notifications
+
+-- ------------------------------------------------------------
+-- 3. Station-related test data
+-- ------------------------------------------------------------
+
+TRUNCATE TABLE public.station_shift_templates
+RESTART IDENTITY CASCADE;
+
+TRUNCATE TABLE public.station_operating_systems
+RESTART IDENTITY CASCADE;
+
+TRUNCATE TABLE public.stations
+RESTART IDENTITY CASCADE;
+
+
+-- ------------------------------------------------------------
+-- 4. Notifications
+-- ------------------------------------------------------------
+
 TRUNCATE TABLE public.notifications RESTART IDENTITY CASCADE;
 
--- wipe test stastion 
-TRUNCATE TABLE public.stations RESTART IDENTITY CASCADE;
-TRUNCATE TABLE public.station_shift_templates RESTART IDENTITY CASCADE;
-TRUNCATE TABLE public.station_operating_systems RESTART IDENTITY CASCADE;
 
--- 4. Wipe test leaves and week-offs (if tables exist)
+-- ------------------------------------------------------------
+-- 5. Optional leave / week-off tables
+-- ------------------------------------------------------------
+
 DO $$
 BEGIN
-  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'leaves') THEN
-    TRUNCATE TABLE public.leaves RESTART IDENTITY CASCADE;
-  END IF;
-  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'week_offs') THEN
-    TRUNCATE TABLE public.week_offs RESTART IDENTITY CASCADE;
-  END IF;
-END $$;
 
--- 5. Wipe test operators/profiles (Preserving Admins)
-DELETE FROM public.profiles
-WHERE role != 'admin';
+    IF to_regclass('public.leaves') IS NOT NULL THEN
+        TRUNCATE TABLE public.leaves RESTART IDENTITY CASCADE;
+    END IF;
 
--- Re-enable normal trigger execution and constraints
-SET session_replication_role = 'origin';
+    IF to_regclass('public.week_offs') IS NOT NULL THEN
+        TRUNCATE TABLE public.week_offs RESTART IDENTITY CASCADE;
+    END IF;
+
+END
+$$;
 
 
-SET session_replication_role = 'replica';
+-- ------------------------------------------------------------
+-- 6. Delete ALL application profiles
+-- ------------------------------------------------------------
 
--- Clean non-admin test accounts out of auth.users
-DELETE FROM auth.users
-WHERE id NOT IN (
-    SELECT id FROM public.profiles WHERE role = 'admin'
-);
+DELETE FROM public.profiles;
 
-DELETE FROM public.profiles
-WHERE role != 'admin';
 
-SET session_replication_role = 'origin';
+-- ------------------------------------------------------------
+-- 7. Delete ALL Supabase Auth users
+-- ------------------------------------------------------------
+
+DELETE FROM auth.users;
+
+
+-- Restore normal trigger/constraint behavior
+SET LOCAL session_replication_role = 'origin';
+
+COMMIT;
+
+
+-- ============================================================
+-- VERIFY
+-- ============================================================
+
+SELECT 'profiles' AS table_name, COUNT(*) AS remaining_rows
+FROM public.profiles
+
+UNION ALL
+
+SELECT 'auth.users', COUNT(*)
+FROM auth.users
+
+UNION ALL
+
+SELECT 'attendance', COUNT(*)
+FROM public.attendance
+
+UNION ALL
+
+SELECT 'punch_sessions', COUNT(*)
+FROM public.punch_sessions
+
+UNION ALL
+
+SELECT 'shift_assignments', COUNT(*)
+FROM public.shift_assignments
+
+UNION ALL
+
+SELECT 'shifts', COUNT(*)
+FROM public.shifts
+
+UNION ALL
+
+SELECT 'stations', COUNT(*)
+FROM public.stations
+
+UNION ALL
+
+SELECT 'notifications', COUNT(*)
+FROM public.notifications;
+
+
 
 
 

@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart' as supabase;
 import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/core/services/push_notification_service.dart';
 import '../data/auth_repository.dart';
@@ -10,7 +12,7 @@ import '../data/user_model.dart';
 enum AuthStatus {
   initial,
   authenticating,
-  needsOtpAndPinSetup,
+  needsPinSetup,
   pinRequired,
   authenticated,
   unauthenticated,
@@ -53,30 +55,73 @@ class AuthNotifier extends StateNotifier<AuthState> {
   final AuthRepository _repo;
   static const _userSessionKey = 'metro_cached_user_session';
 
+  StreamSubscription<supabase.AuthState>? _authStateSubscription;
+
   AuthNotifier(this._repo) : super(const AuthState()) {
+    _listenToSupabaseAuth();
     restoreSession();
+  }
+
+  void _listenToSupabaseAuth() {
+    _authStateSubscription =
+        SupabaseService.client.auth.onAuthStateChange.listen((data) async {
+      final event = data.event;
+      if (event == supabase.AuthChangeEvent.signedOut) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(_userSessionKey);
+        if (mounted) {
+          state = const AuthState(status: AuthStatus.unauthenticated);
+        }
+      } else if (event == supabase.AuthChangeEvent.tokenRefreshed) {
+        // Keep the cached profile in sync with the live Supabase session.
+        if (mounted && state.user != null && state.status == AuthStatus.unauthenticated) {
+          state = state.copyWith(status: AuthStatus.authenticated);
+        }
+      }
+    });
   }
 
   // Restore stored session on app startup
   Future<void> restoreSession() async {
     try {
+      final session = SupabaseService.client.auth.currentSession;
       final prefs = await SharedPreferences.getInstance();
       final userJson = prefs.getString(_userSessionKey);
 
       if (userJson != null) {
-        final Map<String, dynamic> userMap = jsonDecode(userJson);
-        final user = UserModel.fromMap(userMap);
-
-        // Bypass backend deactivation and DB profile checks for Admin on Web
-        if (user.role == 'admin') {
-          state = state.copyWith(status: AuthStatus.authenticated, user: user);
+        // A cached profile is not enough to authorize Supabase REST/RPC calls.
+        // If the native Supabase session is gone (for example after an invalid
+        // refresh token), never keep the UI in a fake authenticated state.
+        if (session == null) {
+          await prefs.remove(_userSessionKey);
+          state = const AuthState(status: AuthStatus.unauthenticated);
           return;
         }
 
-        // Verify active status in real-time for regular operators / supervisors
+        Map<String, dynamic> userMap = jsonDecode(userJson);
+        UserModel user = UserModel.fromMap(userMap);
+
+        // Check if token has expired and refresh if necessary.
+        if (session.isExpired) {
+          try {
+            final refreshed =
+                await SupabaseService.client.auth.refreshSession();
+            if (refreshed.session == null) {
+              await prefs.remove(_userSessionKey);
+              state = const AuthState(status: AuthStatus.unauthenticated);
+              return;
+            }
+          } catch (_) {
+            await prefs.remove(_userSessionKey);
+            state = const AuthState(status: AuthStatus.unauthenticated);
+            return;
+          }
+        }
+
+        // Verify active status in real-time
         final profile = await SupabaseService.client
             .from('profiles')
-            .select('is_active')
+            .select('is_active, has_pin')
             .eq('id', user.id)
             .maybeSingle();
 
@@ -89,7 +134,24 @@ class AuthNotifier extends StateNotifier<AuthState> {
           return;
         }
 
-        state = state.copyWith(status: AuthStatus.authenticated, user: user);
+        final bool hasPin = profile?['has_pin'] ?? user.hasPinConfigured;
+        final updatedUser = user.copyWith(hasPinConfigured: hasPin);
+
+        // First-login Security PIN setup applies to every non-admin staff
+        // account: primary supervisors, relievers, and operators.
+        if (!hasPin && user.role != 'admin') {
+          state = state.copyWith(
+            status: AuthStatus.needsPinSetup,
+            user: updatedUser,
+            pendingPhone: updatedUser.phoneNumber,
+          );
+          return;
+        }
+
+        state = state.copyWith(
+          status: AuthStatus.authenticated,
+          user: updatedUser,
+        );
 
         if (!kIsWeb) {
           await PushNotificationService.syncFCMToken(user.id);
@@ -99,7 +161,6 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
       state = state.copyWith(status: AuthStatus.unauthenticated);
     } catch (e) {
-      debugPrint('Error restoring session: $e');
       state = state.copyWith(status: AuthStatus.unauthenticated);
     }
   }
@@ -121,36 +182,43 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = const AuthState(status: AuthStatus.initial);
   }
 
+  /// Check phone registration and prompt for PIN
   Future<void> checkPhone(String phone) async {
     state = state.copyWith(
       status: AuthStatus.authenticating,
       errorMessage: null,
     );
     try {
-      final user = await _repo.verifyPhoneNumberRegistered(phone);
-
-      // Check if user is active
-      final profile = await SupabaseService.client
-          .from('profiles')
-          .select('is_active')
-          .eq('id', user.id)
-          .maybeSingle();
-
-      if (profile != null && profile['is_active'] == false) {
-        throw Exception('Your account is deactivated. Contact Administrator.');
+      final cleanPhone = phone.replaceAll(RegExp(r'\D'), '').trim();
+      if (cleanPhone.length < 10) {
+        throw Exception('Please enter a valid 10-digit mobile number');
       }
 
-      if (user.hasPinConfigured) {
+      final res = await SupabaseService.client.rpc(
+        'check_phone_registration',
+        params: {'p_phone': cleanPhone},
+      );
+
+      final data = res as Map<String, dynamic>;
+      if (data['success'] != true) {
+        throw Exception(data['error'] ?? 'Phone verification failed');
+      }
+
+      final userMap = data['user'] as Map<String, dynamic>;
+      final user = UserModel.fromMap(userMap);
+      final bool hasConfiguredPin = userMap['has_pin'] == true;
+
+      if (hasConfiguredPin) {
         state = state.copyWith(
           status: AuthStatus.pinRequired,
           user: user,
-          pendingPhone: phone,
+          pendingPhone: cleanPhone,
         );
       } else {
         state = state.copyWith(
-          status: AuthStatus.needsOtpAndPinSetup,
+          status: AuthStatus.needsPinSetup,
           user: user,
-          pendingPhone: phone,
+          pendingPhone: cleanPhone,
         );
       }
     } catch (e) {
@@ -161,15 +229,75 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
-  Future<void> verifyOtpAndSetCustomPin({
-    required String otp,
+  /// Authenticate with PIN and issue a native Supabase JWT Session
+  /// Login using Phone & PIN via Edge Function
+  Future<void> loginWithPin(String pin) async {
+    state = state.copyWith(
+      status: AuthStatus.authenticating,
+      errorMessage: null,
+    );
+    try {
+      final phone = state.pendingPhone ?? state.user?.phoneNumber;
+      if (phone == null || phone.isEmpty) {
+        throw Exception('Phone number missing. Please re-enter.');
+      }
+
+      // Calls repository -> Edge Function 'verify-pin' -> setSession()
+      final authenticatedUser = await _repo.signInWithPhoneAndPin(
+        phone: phone,
+        pin: pin,
+      );
+
+      await _cacheUser(authenticatedUser);
+
+      // First-login Security PIN setup applies to every non-admin staff
+      // account: primary supervisors, relievers, and operators.
+      if (!authenticatedUser.hasPinConfigured &&
+          authenticatedUser.role != 'admin') {
+        state = state.copyWith(
+          status: AuthStatus.needsPinSetup,
+          user: authenticatedUser,
+          pendingPhone: phone,
+        );
+        return;
+      }
+
+      state = state.copyWith(
+        status: AuthStatus.authenticated,
+        user: authenticatedUser,
+      );
+
+      if (!kIsWeb) {
+        await PushNotificationService.syncFCMToken(authenticatedUser.id);
+      }
+    } catch (e) {
+      state = state.copyWith(
+        status: AuthStatus.pinRequired,
+        errorMessage: e.toString().replaceAll('Exception: ', ''),
+      );
+    }
+  }
+
+  /// First-login / custom 4-digit Security PIN Setup for staff
+  Future<void> setCustomPin({
     required String newPin,
     required String confirmPin,
   }) async {
-    if (newPin != confirmPin) {
+    final cleanNewPin = newPin.trim();
+    final cleanConfirmPin = confirmPin.trim();
+
+    if (cleanNewPin != cleanConfirmPin) {
       state = state.copyWith(
         status: state.status,
         errorMessage: 'PINs do not match. Please re-enter.',
+      );
+      return;
+    }
+
+    if (cleanNewPin.length != 4 || !RegExp(r'^\d{4}$').hasMatch(cleanNewPin)) {
+      state = state.copyWith(
+        status: state.status,
+        errorMessage: 'PIN must be exactly 4 digits.',
       );
       return;
     }
@@ -178,35 +306,36 @@ class AuthNotifier extends StateNotifier<AuthState> {
       status: AuthStatus.authenticating,
       errorMessage: null,
     );
+
     try {
-      if (state.pendingPhone == null || state.user == null) {
-        throw Exception('Session expired. Please re-enter your phone number.');
+      if (state.user == null) {
+        throw Exception('Session expired. Please log in again.');
       }
 
-      // Check active status
-      final profile = await SupabaseService.client
-          .from('profiles')
-          .select('is_active')
-          .eq('id', state.user!.id)
-          .maybeSingle();
+      final targetUser = state.user!;
+      final phone = state.pendingPhone ?? targetUser.phoneNumber;
 
-      if (profile != null && profile['is_active'] == false) {
-        throw Exception('Your account is deactivated. Contact Administrator.');
-      }
+      // Save the permanent application PIN. This PIN is NOT used as a
+      // Supabase Auth password.
+      await _repo.setupCustomPin(userId: targetUser.id, pin: cleanNewPin);
 
-      // Test OTP acceptance: accept valid 6-digit code
-      if (otp.trim().length != 6) {
-        throw Exception('Invalid 6-digit verification code.');
-      }
+      // Now establish the real Supabase Auth session through the existing
+      // phone + PIN authentication path. The verify-pin Edge Function
+      // provisions/updates the internal Auth credentials and then the
+      // client signs in normally.
+      final authenticatedUser = await _repo.signInWithPhoneAndPin(
+        phone: phone,
+        pin: cleanNewPin,
+      );
 
-      await _repo.setupCustomPin(userId: state.user!.id, pin: newPin);
-
-      final updatedUser = state.user!.copyWith(hasPinConfigured: true);
+      final updatedUser = authenticatedUser.copyWith(hasPinConfigured: true);
       await _cacheUser(updatedUser);
 
       state = state.copyWith(
         status: AuthStatus.authenticated,
         user: updatedUser,
+        pendingPhone: phone,
+        errorMessage: null,
       );
 
       if (!kIsWeb) {
@@ -220,39 +349,18 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
-  Future<void> loginWithPin(String pin) async {
-    state = state.copyWith(
-      status: AuthStatus.authenticating,
-      errorMessage: null,
-    );
-    try {
-      if (state.user == null) throw Exception('No active session.');
-
-      // Check if user is active
-      final profile = await SupabaseService.client
-          .from('profiles')
-          .select('is_active')
-          .eq('id', state.user!.id)
-          .maybeSingle();
-
-      if (profile != null && profile['is_active'] == false) {
-        throw Exception('Your account is deactivated. Contact Administrator.');
-      }
-
-      await _repo.validatePin(userId: state.user!.id, pin: pin);
-
-      await _cacheUser(state.user!);
-      state = state.copyWith(status: AuthStatus.authenticated);
-
-      if (!kIsWeb) {
-        await PushNotificationService.syncFCMToken(state.user!.id);
-      }
-    } catch (e) {
-      state = state.copyWith(
-        status: AuthStatus.pinRequired,
-        errorMessage: e.toString().replaceAll('Exception: ', ''),
-      );
+  /// Supervisor resets an operator PIN
+  Future<String> supervisorResetOperatorPin(String operatorPhone) async {
+    if (state.user == null || state.user!.role != 'supervisor') {
+      throw Exception('Unauthorized action.');
     }
+
+    final tempPin = await _repo.supervisorGenerateAndSendPin(
+      operatorPhone: operatorPhone,
+      supervisorId: state.user!.id,
+    );
+
+    return tempPin;
   }
 
   Future<void> loginAdmin(String email, String password) async {
@@ -262,18 +370,13 @@ class AuthNotifier extends StateNotifier<AuthState> {
     );
     try {
       final user = await _repo.loginAdmin(email, password);
-
-      // Save session first so page refreshes persist
       await _cacheUser(user);
-
-      // Transition immediately into authenticated state with the returned admin user
       state = AuthState(status: AuthStatus.authenticated, user: user);
 
       if (!kIsWeb) {
         await PushNotificationService.syncFCMToken(user.id);
       }
     } catch (e) {
-      debugPrint('loginAdmin error: $e');
       state = state.copyWith(
         status: AuthStatus.error,
         errorMessage: e.toString().replaceAll('Exception: ', ''),
@@ -284,8 +387,21 @@ class AuthNotifier extends StateNotifier<AuthState> {
   Future<void> logout() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_userSessionKey);
-    await _repo.signOut();
-    state = const AuthState(status: AuthStatus.unauthenticated);
+    try {
+      await SupabaseService.client.auth.signOut(scope: supabase.SignOutScope.local);
+    } catch (_) {}
+    try {
+      await _repo.signOut();
+    } catch (_) {}
+    if (mounted) {
+      state = const AuthState(status: AuthStatus.unauthenticated);
+    }
+  }
+
+  @override
+  void dispose() {
+    _authStateSubscription?.cancel();
+    super.dispose();
   }
 }
 

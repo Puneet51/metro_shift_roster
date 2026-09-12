@@ -15,15 +15,20 @@ import 'package:metro_shift_roster/features/auth/presentation/splash_screen.dart
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Load environment variables before initializing network services
+  // 1. Attempt to load .env safely
   try {
     await dotenv.load(fileName: ".env");
   } catch (e) {
-    debugPrint('DotEnv initialization error: $e');
+    debugPrint('DotEnv load notice: $e');
   }
 
-  // 2. Initialize Supabase
-  await SupabaseService.initialize();
+  // 2. Initialize Supabase before any provider accesses Supabase.instance.
+  try {
+    await SupabaseService.initialize();
+  } catch (e) {
+    runApp(MaterialApp(home: Scaffold(body: Center(child: Padding(padding: EdgeInsets.all(24), child: Text('Supabase configuration could not be loaded. Check your .env file and restart the app.\n\n$e'))))));
+    return;
+  }
 
   // 3. Initialize Firebase & Push Notifications safely (Mobile only)
   if (!kIsWeb) {
@@ -62,9 +67,11 @@ class _MetroShiftAppState extends ConsumerState<MetroShiftApp> {
       home: !_hasCheckedVersion
           ? SplashScreen(
               onCheckComplete: () {
-                setState(() {
-                  _hasCheckedVersion = true;
-                });
+                if (mounted) {
+                  setState(() {
+                    _hasCheckedVersion = true;
+                  });
+                }
               },
             )
           : _resolveHomeScreen(authState),

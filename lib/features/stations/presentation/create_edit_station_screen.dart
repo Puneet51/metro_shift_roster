@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:metro_shift_roster/core/utils/display_formatters.dart';
 import 'package:metro_shift_roster/core/services/location_service.dart';
 import 'package:metro_shift_roster/features/stations/data/station_model.dart';
 import 'package:metro_shift_roster/features/stations/presentation/station_provider.dart';
@@ -19,7 +20,6 @@ class _CreateEditStationScreenState
   late final TextEditingController _nameController;
   late final TextEditingController _latController;
   late final TextEditingController _lngController;
-  late final TextEditingController _radiusController;
   late final TextEditingController _amountController;
   final _customTomController = TextEditingController();
 
@@ -42,9 +42,6 @@ class _CreateEditStationScreenState
     _lngController = TextEditingController(
       text: stn != null ? stn.longitude.toString() : '',
     );
-    _radiusController = TextEditingController(
-      text: stn != null ? stn.punchRadiusMeters.toString() : '600',
-    );
     _amountController = TextEditingController(
       text: stn != null ? stn.defaultFixedAmount.toString() : '700',
     );
@@ -53,14 +50,14 @@ class _CreateEditStationScreenState
       _tomSystems.addAll(stn.operatingSystems.map((e) => e.systemName));
       _shiftTemplates.addAll(
         stn.shiftTemplates.map(
-          (e) => {'name': e.shiftName, 'start': e.startTime, 'end': e.endTime},
+          (e) => {'id': e.id, 'name': e.shiftName, 'start': e.startTime, 'end': e.endTime},
         ),
       );
     } else {
       _tomSystems.addAll(['TOM 01', 'TOM 02']);
       _shiftTemplates.addAll([
-        {'name': 'A Shift', 'start': '06:00:00', 'end': '14:00:00'},
-        {'name': 'B Shift', 'start': '14:00:00', 'end': '22:00:00'},
+        {'id': 'default-a-${DateTime.now().microsecondsSinceEpoch}', 'name': 'A Shift', 'start': '06:00:00', 'end': '14:00:00'},
+        {'id': 'default-b-${DateTime.now().microsecondsSinceEpoch + 1}', 'name': 'B Shift', 'start': '14:00:00', 'end': '22:00:00'},
       ]);
     }
   }
@@ -70,7 +67,6 @@ class _CreateEditStationScreenState
     _nameController.dispose();
     _latController.dispose();
     _lngController.dispose();
-    _radiusController.dispose();
     _amountController.dispose();
     _customTomController.dispose();
     _newShiftNameController.dispose();
@@ -124,7 +120,7 @@ class _CreateEditStationScreenState
         '${_newShiftEnd.hour.toString().padLeft(2, '0')}:${_newShiftEnd.minute.toString().padLeft(2, '0')}:00';
 
     setState(() {
-      _shiftTemplates.add({'name': name, 'start': startStr, 'end': endStr});
+      _shiftTemplates.add({'id': DateTime.now().microsecondsSinceEpoch.toString(), 'name': name, 'start': startStr, 'end': endStr});
       _newShiftNameController.text = 'Shift ${_shiftTemplates.length + 1}';
     });
   }
@@ -209,30 +205,13 @@ class _CreateEditStationScreenState
                 ],
               ),
               const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextFormField(
-                      controller: _radiusController,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: 'Punch Radius (M)',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextFormField(
-                      controller: _amountController,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: 'Fixed Daily Rate (₹)',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                  ),
-                ],
+              TextFormField(
+                controller: _amountController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Fixed Daily Rate (₹)',
+                  border: OutlineInputBorder(),
+                ),
               ),
               const SizedBox(height: 24),
               const Text(
@@ -309,7 +288,7 @@ class _CreateEditStationScreenState
                     dense: true,
                     leading: const Icon(Icons.alarm, color: Color(0xFF1E3A8A)),
                     title: Text(
-                      '${item['name']}: ${item['start']} - ${item['end']}',
+                      '${item['name']}: ${formatDisplayTime(item['start'])} - ${formatDisplayTime(item['end'])}',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     trailing: IconButton(
@@ -392,9 +371,6 @@ class _CreateEditStationScreenState
                               longitude: double.parse(
                                 _lngController.text.trim(),
                               ),
-                              punchRadius:
-                                  int.tryParse(_radiusController.text.trim()) ??
-                                  600,
                               fixedAmount:
                                   double.tryParse(
                                     _amountController.text.trim(),

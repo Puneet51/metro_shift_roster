@@ -1,19 +1,13 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
 import 'package:metro_shift_roster/features/stations/presentation/stations_list_screen.dart';
 import 'package:metro_shift_roster/features/staff/presentation/staff_list_screen.dart';
 import 'package:metro_shift_roster/features/staff/presentation/week_off_leave_screen.dart';
 import 'package:metro_shift_roster/features/shifts/presentation/supervisor_roster_screen.dart';
-import 'package:metro_shift_roster/features/shifts/presentation/create_edit_shift_screen.dart';
-import 'package:metro_shift_roster/features/shifts/presentation/shift_provider.dart';
-import 'package:metro_shift_roster/features/punch_attendance/presentation/punch_audit_check_screen.dart';
-import 'package:metro_shift_roster/features/punch_attendance/presentation/punch_history_screen.dart';
+import 'package:metro_shift_roster/features/attendance/presentation/attendance_screen.dart';
 import 'package:metro_shift_roster/features/profile/presentation/profile_screen.dart';
 import 'package:metro_shift_roster/features/notifications/presentation/notification_screen.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 class SupervisorHomeScreen extends ConsumerStatefulWidget {
   const SupervisorHomeScreen({super.key});
@@ -25,54 +19,6 @@ class SupervisorHomeScreen extends ConsumerStatefulWidget {
 
 class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
   int _currentIndex = 0;
-  RealtimeChannel? _realtimeChannel;
-
-  @override
-  void initState() {
-    super.initState();
-    _setupRealtimeSubscription();
-  }
-
-  void _setupRealtimeSubscription() {
-    _realtimeChannel = SupabaseService.client
-        .channel('public:supervisor_roster_sync')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'shifts',
-          callback: (_) {
-            ref.invalidate(supervisorShiftsProvider);
-            if (mounted) setState(() {});
-          },
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'shift_assignments',
-          callback: (_) {
-            ref.invalidate(supervisorShiftsProvider);
-            if (mounted) setState(() {});
-          },
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.all,
-          schema: 'public',
-          table: 'attendance',
-          callback: (_) {
-            ref.invalidate(supervisorShiftsProvider);
-            if (mounted) setState(() {});
-          },
-        )
-        .subscribe();
-  }
-
-  @override
-  void dispose() {
-    if (_realtimeChannel != null) {
-      SupabaseService.client.removeChannel(_realtimeChannel!);
-    }
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -81,8 +27,8 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
       const StationsListScreen(),
       const StaffListScreen(),
       const WeekOffLeaveScreen(),
-      const PunchAuditCheckScreen(),
-      const PunchHistoryScreen(),
+      const AttendanceScreen(supervisorReportMode: true),
+      const SupervisorRosterScreen(isReadOnly: true, showHistory: true),
     ];
 
     return Scaffold(
@@ -107,21 +53,6 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
               context,
               MaterialPageRoute(builder: (_) => const NotificationScreen()),
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.add_circle_outline_rounded),
-            tooltip: 'Publish Shift',
-            onPressed: () async {
-              await Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const CreateEditShiftScreen(),
-                ),
-              );
-              // Force update roster data when supervisor finishes publishing/editing
-              ref.invalidate(supervisorShiftsProvider);
-              if (mounted) setState(() {});
-            },
           ),
           IconButton(
             icon: const Icon(Icons.account_circle_outlined),
@@ -185,13 +116,13 @@ class _SupervisorHomeScreenState extends ConsumerState<SupervisorHomeScreen> {
               label: 'Week Off',
             ),
             BottomNavigationBarItem(
-              icon: Icon(Icons.camera_front_outlined),
-              activeIcon: Icon(Icons.camera_front_rounded),
-              label: 'Punch',
+              icon: Icon(Icons.fact_check_outlined),
+              activeIcon: Icon(Icons.fact_check_rounded),
+              label: 'Attendance',
             ),
             BottomNavigationBarItem(
-              icon: Icon(Icons.history_rounded),
-              activeIcon: Icon(Icons.history_edu_rounded),
+              icon: Icon(Icons.history_outlined),
+              activeIcon: Icon(Icons.history_rounded),
               label: 'History',
             ),
           ],

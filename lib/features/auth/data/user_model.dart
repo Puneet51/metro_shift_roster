@@ -35,14 +35,37 @@ class UserModel {
     this.isReliever = false,
   });
 
-  /// Returns own ID if supervisor/admin, or the parent supervisor's ID if operator/reliever
+  /// Returns the primary supervisor ID that owns this user's scope.
+  ///
+  /// A reliever has role == 'supervisor', but is still subordinate to the
+  /// primary supervisor in parentSupervisorId. Therefore relievers must be
+  /// resolved before the generic supervisor case.
+  ///
+  /// Scope:
+  /// - admin -> own ID
+  /// - primary supervisor -> own ID
+  /// - reliever -> parent supervisor ID
+  /// - operator -> parent supervisor ID
   String get effectiveSupervisorId {
-    if (role == 'supervisor' || role == 'admin') {
+    if (role == 'admin') {
       return id;
     }
+
+    if (role == 'supervisor' &&
+        isReliever &&
+        parentSupervisorId != null &&
+        parentSupervisorId!.isNotEmpty) {
+      return parentSupervisorId!;
+    }
+
+    if (role == 'supervisor') {
+      return id;
+    }
+
     if (parentSupervisorId != null && parentSupervisorId!.isNotEmpty) {
       return parentSupervisorId!;
     }
+
     return id;
   }
 

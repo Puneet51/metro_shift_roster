@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:metro_shift_roster/core/utils/display_formatters.dart';
 import 'shift_provider.dart';
 import 'create_edit_shift_screen.dart';
 import '../data/shift_model.dart';
 
 class SupervisorRosterScreen extends ConsumerStatefulWidget {
   final bool isReadOnly;
-  const SupervisorRosterScreen({super.key, this.isReadOnly = false});
+  final bool showHistory;
+  const SupervisorRosterScreen({super.key, this.isReadOnly = false, this.showHistory = false});
 
   @override
   ConsumerState<SupervisorRosterScreen> createState() =>
@@ -32,24 +34,47 @@ class _SupervisorRosterScreenState
     return const Color(0xFF0D9488);
   }
 
-  // Returns true if shift date is before today (Past Date Rule)
-  bool _isPastDate(String dutyDateStr) {
+  int _compareShiftNames(String a, String b) {
+    return a.trim().compareTo(b.trim());
+  }
+
+  int _compareTomSystems(String a, String b) {
+    return a.trim().compareTo(b.trim());
+  }
+
+  bool _isCompleted(ShiftModel shift) {
     try {
-      final dutyDate = DateTime.parse(dutyDateStr);
-      final now = DateTime.now();
-      final todayMidnight = DateTime(now.year, now.month, now.day);
-      final shiftDay = DateTime(dutyDate.year, dutyDate.month, dutyDate.day);
-      return shiftDay.isBefore(todayMidnight);
+      final day = DateTime.parse(shift.dutyDate);
+      final parts = shift.endTime.split(':');
+      final end = DateTime(day.year, day.month, day.day,
+          int.tryParse(parts.isNotEmpty ? parts[0] : '0') ?? 0,
+          int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0);
+      var completedAt = end;
+      final startParts = shift.startTime.split(':');
+      final startHour = int.tryParse(startParts.isNotEmpty ? startParts[0] : '0') ?? 0;
+      final endHour = int.tryParse(parts.isNotEmpty ? parts[0] : '0') ?? 0;
+      if (endHour < startHour) completedAt = end.add(const Duration(days: 1));
+      return DateTime.now().isAfter(completedAt);
     } catch (_) {
       return false;
     }
   }
 
-  Future<void> _openPublishScreen([String? stationId]) async {
+  Future<void> _openPublishScreen({
+    String? stationId,
+    String? dutyDate,
+    String? shiftName,
+    String? shiftId,
+  }) async {
     final result = await Navigator.push<String?>(
       context,
       MaterialPageRoute(
-        builder: (_) => CreateEditShiftScreen(initialStationId: stationId),
+        builder: (_) => CreateEditShiftScreen(
+          initialStationId: stationId,
+          initialDutyDate: dutyDate,
+          initialShiftName: shiftName,
+          initialShiftId: shiftId,
+        ),
       ),
     );
 
@@ -72,10 +97,30 @@ class _SupervisorRosterScreenState
         onRefresh: () async => ref.invalidate(supervisorShiftsProvider),
         child: shiftsAsync.when(
           data: (allShifts) {
-            // STRICT RULE: Filter out past dates so only Today & Upcoming shifts show in Roster
-            final activeShifts = allShifts
-                .where((s) => !_isPastDate(s.dutyDate))
-                .toList();
+            final todayKey = DateFormat('yyyy-MM-dd').format(DateTime.now());
+            final activeShifts = allShifts.where((s) {
+              final completed = _isCompleted(s);
+              if (widget.showHistory) return s.isPublished && completed;
+              if (!s.isPublished || completed) return false;
+              // Keep a currently-running cross-midnight duty visible until its
+              // actual end time, even though its operational duty_date is yesterday.
+              if (s.dutyDate.compareTo(todayKey) < 0) {
+                final dutyDay = DateTime.tryParse(s.dutyDate);
+                if (dutyDay == null) return false;
+                final startParts = s.startTime.split(':');
+                final endParts = s.endTime.split(':');
+                final sh = int.tryParse(startParts.isNotEmpty ? startParts[0] : '0') ?? 0;
+                final sm = int.tryParse(startParts.length > 1 ? startParts[1] : '0') ?? 0;
+                final eh = int.tryParse(endParts.isNotEmpty ? endParts[0] : '0') ?? 0;
+                final em = int.tryParse(endParts.length > 1 ? endParts[1] : '0') ?? 0;
+                if (eh * 60 + em < sh * 60 + sm) {
+                  final endAt = DateTime(dutyDay.year, dutyDay.month, dutyDay.day + 1, eh, em);
+                  return DateTime.now().isBefore(endAt);
+                }
+                return false;
+              }
+              return s.dutyDate.compareTo(todayKey) >= 0;
+            }).toList();
 
             if (activeShifts.isEmpty) {
               return ListView(
@@ -98,8 +143,8 @@ class _SupervisorRosterScreenState
                           ),
                         ),
                         const SizedBox(height: 14),
-                        const Text(
-                          'No Active or Upcoming Shifts',
+                        Text(
+                          widget.showHistory ? 'No Completed Shifts' : 'No Active or Upcoming Shifts',
                           style: TextStyle(
                             fontSize: 17,
                             fontWeight: FontWeight.bold,
@@ -108,7 +153,7 @@ class _SupervisorRosterScreenState
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'Completed shifts have moved to History.\nPublish new shifts for upcoming dates.',
+                          widget.showHistory ? 'Completed published shifts are kept here for reference.' : 'Completed shifts have moved to History.\nPublish new shifts for upcoming dates.',
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontSize: 13,
@@ -122,10 +167,9 @@ class _SupervisorRosterScreenState
               );
             }
 
-            // Ascending order: Today first, then upcoming dates
             final List<String> availableDates =
                 activeShifts.map((s) => s.dutyDate).toSet().toList()
-                  ..sort((a, b) => a.compareTo(b));
+                  ..sort((a, b) => widget.showHistory ? b.compareTo(a) : a.compareTo(b));
 
             if (_selectedDutyDate == null ||
                 !availableDates.contains(_selectedDutyDate)) {
@@ -143,10 +187,16 @@ class _SupervisorRosterScreenState
                   .add(shift);
             }
 
+            final sortedStationIds = groupedByStation.keys.toList()
+              ..sort((a, b) {
+                final nameA = groupedByStation[a]?.first.stationName ?? '';
+                final nameB = groupedByStation[b]?.first.stationName ?? '';
+                return nameA.compareTo(nameB);
+              });
+
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Date Filter Strip
                 Container(
                   width: double.infinity,
                   padding: const EdgeInsets.symmetric(
@@ -221,7 +271,7 @@ class _SupervisorRosterScreenState
                                   const SizedBox(width: 6),
                                   Text(
                                     isToday
-                                        ? 'Today (${DateFormat('dd MMM').format(parsedDate)})'
+                                        ? 'Today (${DateFormat('dd/MM/yyyy').format(parsedDate)})'
                                         : DateFormat(
                                             'EEE, dd MMM',
                                           ).format(parsedDate),
@@ -246,16 +296,21 @@ class _SupervisorRosterScreenState
                     ),
                   ),
                 ),
-
-                // Station Cards
                 Expanded(
                   child: ListView.builder(
                     padding: const EdgeInsets.all(12),
-                    itemCount: groupedByStation.keys.length,
+                    itemCount: sortedStationIds.length,
                     itemBuilder: (context, idx) {
-                      final stationId = groupedByStation.keys.elementAt(idx);
+                      final stationId = sortedStationIds[idx];
                       final stationShifts = groupedByStation[stationId]!;
                       final stationName = stationShifts.first.stationName;
+
+                      stationShifts.sort((a, b) {
+                        final timeComp = a.startTime.compareTo(b.startTime);
+                        return timeComp != 0
+                            ? timeComp
+                            : _compareShiftNames(a.shiftName, b.shiftName);
+                      });
 
                       return Container(
                         margin: const EdgeInsets.only(bottom: 12),
@@ -307,25 +362,22 @@ class _SupervisorRosterScreenState
                                       ),
                                     ],
                                   ),
-                                  if (!widget.isReadOnly)
-                                    IconButton(
-                                      icon: const Icon(
-                                        Icons.edit_outlined,
-                                        color: Color(0xFF2563EB),
-                                        size: 20,
-                                      ),
-                                      tooltip: 'Edit Station Shifts',
-                                      onPressed: () =>
-                                          _openPublishScreen(stationId),
-                                    ),
+
                                 ],
                               ),
                               const SizedBox(height: 10),
-
                               ...stationShifts.map((shift) {
                                 final badgeColor = _getShiftBadgeColor(
                                   shift.shiftName,
                                 );
+
+                                final sortedAssignments =
+                                    List.of(shift.assignments)..sort(
+                                      (a, b) => _compareTomSystems(
+                                        a.systemName,
+                                        b.systemName,
+                                      ),
+                                    );
 
                                 return Container(
                                   margin: const EdgeInsets.symmetric(
@@ -368,87 +420,113 @@ class _SupervisorRosterScreenState
                                           ),
                                         ),
                                       ),
-                                      title: Row(
+                                      title: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
                                         children: [
-                                          const Icon(
-                                            Icons.access_time_rounded,
-                                            size: 14,
-                                            color: Color(0xFF64748B),
+                                          Row(
+                                            children: [
+                                              const Icon(
+                                                Icons.access_time_rounded,
+                                                size: 14,
+                                                color: Color(0xFF64748B),
+                                              ),
+                                              const SizedBox(width: 5),
+                                              Expanded(
+                                                child: Text(
+                                                  '${formatDisplayTime(shift.startTime)} - ${formatDisplayTime(shift.endTime)}',
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 13,
+                                                    color: Color(0xFF334155),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
                                           ),
-                                          const SizedBox(width: 5),
-                                          Text(
-                                            '${shift.startTime} - ${shift.endTime}',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.w600,
-                                              fontSize: 13,
-                                              color: Color(0xFF334155),
+                                          if (shift.publishedByName != null &&
+                                              shift.publishedByName!.trim().isNotEmpty)
+                                            Padding(
+                                              padding: const EdgeInsets.only(top: 3),
+                                              child: Row(
+                                                children: [
+                                                  const Icon(
+                                                    Icons.verified_user_outlined,
+                                                    size: 12,
+                                                    color: Color(0xFF64748B),
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  Flexible(
+                                                    child: Text(
+                                                      'Published by ${shift.publishedByName}',
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: const TextStyle(
+                                                        fontSize: 11,
+                                                        color: Color(0xFF64748B),
+                                                        fontWeight: FontWeight.w500,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
-                                          ),
                                         ],
                                       ),
                                       trailing: !widget.isReadOnly
-                                          ? IconButton(
-                                              icon: const Icon(
-                                                Icons.delete_outline_rounded,
-                                                color: Colors.redAccent,
-                                                size: 20,
-                                              ),
-                                              onPressed: () async {
-                                                final confirm = await showDialog<bool>(
-                                                  context: context,
-                                                  builder: (ctx) => AlertDialog(
-                                                    title: const Text(
-                                                      'Delete Shift',
-                                                    ),
-                                                    content: Text(
-                                                      'Delete ${shift.shiftName} for $stationName?',
-                                                    ),
-                                                    actions: [
-                                                      TextButton(
-                                                        onPressed: () =>
-                                                            Navigator.pop(
-                                                              ctx,
-                                                              false,
-                                                            ),
-                                                        child: const Text(
-                                                          'Cancel',
-                                                        ),
-                                                      ),
-                                                      ElevatedButton(
-                                                        style:
-                                                            ElevatedButton.styleFrom(
-                                                              backgroundColor:
-                                                                  Colors.red,
-                                                            ),
-                                                        onPressed: () =>
-                                                            Navigator.pop(
-                                                              ctx,
-                                                              true,
-                                                            ),
-                                                        child: const Text(
-                                                          'Delete',
-                                                          style: TextStyle(
-                                                            color: Colors.white,
-                                                          ),
-                                                        ),
-                                                      ),
-                                                    ],
+                                          ? Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: 'Edit this shift only',
+                                                  icon: const Icon(
+                                                    Icons.edit_outlined,
+                                                    color: Color(0xFF2563EB),
+                                                    size: 20,
                                                   ),
-                                                );
-                                                if (confirm == true) {
-                                                  await ref
-                                                      .read(
-                                                        shiftRepositoryProvider,
-                                                      )
-                                                      .deleteShift(shift.id);
-                                                  ref.invalidate(
-                                                    supervisorShiftsProvider,
-                                                  );
-                                                }
-                                              },
+                                                  onPressed: () => _openPublishScreen(
+                                                    stationId: stationId,
+                                                    dutyDate: shift.dutyDate,
+                                                    shiftName: shift.shiftName,
+                                                    shiftId: shift.id,
+                                                  ),
+                                                ),
+                                                IconButton(
+                                                  tooltip: 'Delete this shift only',
+                                                  icon: const Icon(
+                                                    Icons.delete_outline_rounded,
+                                                    color: Colors.redAccent,
+                                                    size: 20,
+                                                  ),
+                                                  onPressed: () async {
+                                                    final confirm = await showDialog<bool>(
+                                                      context: context,
+                                                      builder: (ctx) => AlertDialog(
+                                                        title: const Text('Delete Shift'),
+                                                        content: Text('Delete ${shift.shiftName} for $stationName?'),
+                                                        actions: [
+                                                          TextButton(
+                                                            onPressed: () => Navigator.pop(ctx, false),
+                                                            child: const Text('Cancel'),
+                                                          ),
+                                                          ElevatedButton(
+                                                            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                                                            onPressed: () => Navigator.pop(ctx, true),
+                                                            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+                                                          ),
+                                                        ],
+                                                      ),
+                                                    );
+                                                    if (confirm == true) {
+                                                      await ref.read(shiftRepositoryProvider).deleteShift(shift.id);
+                                                      ref.invalidate(supervisorShiftsProvider);
+                                                    }
+                                                  },
+                                                ),
+                                              ],
                                             )
                                           : null,
-                                      children: shift.assignments.isEmpty
+                                      children: sortedAssignments.isEmpty
                                           ? [
                                               const Padding(
                                                 padding: EdgeInsets.all(12.0),
@@ -461,7 +539,7 @@ class _SupervisorRosterScreenState
                                                 ),
                                               ),
                                             ]
-                                          : shift.assignments.map((a) {
+                                          : sortedAssignments.map((a) {
                                               return Container(
                                                 margin:
                                                     const EdgeInsets.symmetric(

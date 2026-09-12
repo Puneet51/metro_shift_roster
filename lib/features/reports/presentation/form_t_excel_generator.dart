@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:excel/excel.dart';
 import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
+import 'package:metro_shift_roster/core/utils/display_formatters.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:universal_html/html.dart' as html;
@@ -21,142 +22,84 @@ class FormTExcelGenerator {
     final formattedMonth = DateFormat('MMMM yyyy').format(selectedMonth);
 
     final startDate = DateFormat('yyyy-MM-01').format(selectedMonth);
-    final endDate = DateFormat('yyyy-MM-$daysInMonth').format(selectedMonth);
+    final nextMonth = DateTime(year, month + 1, 1);
+    final nextMonthDate = DateFormat('yyyy-MM-01').format(nextMonth);
 
     final isPersonalReport = operatorId != null && operatorId.trim().isNotEmpty;
 
-    // 1. Fetch Completed Attendance Records
-    var attQuery = client
-        .from('attendance')
-        .select('''
+    // Build the report from actual assignments. This makes Excel update as soon as
+    // the shift has actually finished, even before a background attendance
+    // finalizer has written the attendance row.
+    var assignmentQuery = client.from('shift_assignments').select("""
           operator_id,
-          duty_date,
-          punch_in_time,
-          punch_out_time,
-          duty_duration_seconds,
-          status,
-          stations(id, name),
+          station_id,
+          is_ot,
+          shifts!inner(
+            id, duty_date, shift_name, start_time, end_time, is_published
+          ),
           profiles!inner(
-            id,
-            full_name,
-            role,
-            emp_code,
-            company_id,
-            biometric_id,
-            bmrcl_id,
-            father_name,
-            doj,
-            esi_no,
-            uan_no
+            id, full_name, role, emp_code, company_id, biometric_id,
+            bmrcl_id, father_name, doj, esi_no, uan_no
           )
-        ''')
-        .gte('duty_date', startDate)
-        .lte('duty_date', endDate)
-        .not('punch_in_time', 'is', null)
-        .not('punch_out_time', 'is', null);
+        """).eq('shifts.is_published', true)
+        .eq('profiles.role', 'operator')
+        .gte('shifts.duty_date', startDate)
+        .lt('shifts.duty_date', nextMonthDate);
 
-    if (stationId.isNotEmpty && stationId != 'all') {
-      attQuery = attQuery.eq('station_id', stationId);
+    if (stationId.trim().isNotEmpty && stationId != 'all') {
+      assignmentQuery = assignmentQuery.eq('station_id', stationId);
     }
-    if (isPersonalReport) {
-      attQuery = attQuery.eq('operator_id', operatorId);
+    if (isPersonalReport && operatorId != null) {
+      assignmentQuery = assignmentQuery.eq('operator_id', operatorId);
     }
 
-    final attendanceRes = await attQuery;
+    final assignmentRes = await assignmentQuery;
+    final now = DateTime.now();
 
     final Map<String, Map<String, dynamic>> staffMap = {};
     final Map<String, Map<int, String>> attendanceMap = {};
 
-    for (final row in (attendanceRes as List)) {
-      final p = row['profiles'] as Map<String, dynamic>;
-      final opId = p['id'] as String;
-      staffMap.putIfAbsent(opId, () => p);
-
-      final dutyDateStr = row['duty_date'] as String;
-      final date = DateTime.parse(dutyDateStr);
-      final status = (row['status'] ?? '').toString().toLowerCase();
-      final duration = (row['duty_duration_seconds'] as num?)?.toInt() ?? 0;
-      final role = (p['role'] ?? 'operator').toString().toLowerCase();
-
-      final isPresent =
-          status == 'present' || duration >= 28200 || role == 'supervisor';
-
-      if (isPresent) {
-        attendanceMap.putIfAbsent(opId, () => {});
-        attendanceMap[opId]![date.day] = 'P';
-      }
+    DateTime completedAt(String dutyDate, String? start, String? end) {
+      final d = DateTime.tryParse(dutyDate);
+      if (d == null) return DateTime(9999);
+      final sp = (start ?? '00:00:00').split(':');
+      final ep = (end ?? '00:00:00').split(':');
+      final sh = int.tryParse(sp.isNotEmpty ? sp[0] : '0') ?? 0;
+      final sm = int.tryParse(sp.length > 1 ? sp[1] : '0') ?? 0;
+      final eh = int.tryParse(ep.isNotEmpty ? ep[0] : '0') ?? 0;
+      final em = int.tryParse(ep.length > 1 ? ep[1] : '0') ?? 0;
+      var result = DateTime(d.year, d.month, d.day, eh, em);
+      if (eh * 60 + em < sh * 60 + sm) result = result.add(const Duration(days: 1));
+      return result;
     }
 
-    // 2. Fetch Supervisor Attendance ONLY if this is a station-wide supervisor export
-    if (!isPersonalReport) {
-      var supQuery = client
-          .from('attendance')
-          .select('''
-            operator_id,
-            duty_date,
-            punch_in_time,
-            punch_out_time,
-            status,
-            profiles!inner(
-              id,
-              full_name,
-              role,
-              emp_code,
-              company_id,
-              biometric_id,
-              bmrcl_id,
-              father_name,
-              doj,
-              esi_no,
-              uan_no
-            )
-          ''')
-          .gte('duty_date', startDate)
-          .lte('duty_date', endDate)
-          .eq('profiles.role', 'supervisor')
-          .not('punch_in_time', 'is', null)
-          .not('punch_out_time', 'is', null);
+    for (final raw in (assignmentRes as List)) {
+      final row = Map<String, dynamic>.from(raw as Map);
+      final shift = row['shifts'] is Map
+          ? Map<String, dynamic>.from(row['shifts'] as Map)
+          : <String, dynamic>{};
+      final profile = row['profiles'] is Map
+          ? Map<String, dynamic>.from(row['profiles'] as Map)
+          : <String, dynamic>{};
+      final dutyDateStr = shift['duty_date']?.toString() ?? '';
+      if (dutyDateStr.isEmpty || now.isBefore(completedAt(
+            dutyDateStr, shift['start_time']?.toString(), shift['end_time']?.toString()))) continue;
 
-      if (stationId.isNotEmpty && stationId != 'all') {
-        supQuery = supQuery.eq('station_id', stationId);
-      }
-
-      final supervisorRes = await supQuery;
-      for (final row in (supervisorRes as List)) {
-        final p = row['profiles'] as Map<String, dynamic>;
-        final supId = p['id'] as String;
-        staffMap.putIfAbsent(supId, () => p);
-
-        final dutyDateStr = row['duty_date'] as String;
-        final date = DateTime.parse(dutyDateStr);
-        attendanceMap.putIfAbsent(supId, () => {});
-        attendanceMap[supId]![date.day] = 'P';
-      }
+      final opId = profile['id']?.toString() ?? row['operator_id']?.toString() ?? '';
+      if (opId.isEmpty) continue;
+      staffMap[opId] = profile;
+      final date = DateTime.tryParse(dutyDateStr);
+      if (date == null) continue;
+      attendanceMap.putIfAbsent(opId, () => {});
+      // OT is displayed exactly like a normal completed duty.
+      attendanceMap[opId]![date.day] = 'P';
     }
 
-    // Fallback: If operator had no attendance this month, still show their profile row
-    if (isPersonalReport && staffMap.isEmpty) {
-      final userProfile = await client
-          .from('profiles')
-          .select()
-          .eq('id', operatorId)
-          .maybeSingle();
-      if (userProfile != null) {
-        staffMap[operatorId] = userProfile;
-      }
-    }
-
-    // Sort: Supervisors first, then alphabetically
+    // Sort alphabetically by employee name.
     final List<Map<String, dynamic>> allStaff = staffMap.values.toList()
-      ..sort((a, b) {
-        final roleA = (a['role'] ?? '').toString().toLowerCase();
-        final roleB = (b['role'] ?? '').toString().toLowerCase();
-        if (roleA == 'supervisor' && roleB != 'supervisor') return -1;
-        if (roleA != 'supervisor' && roleB == 'supervisor') return 1;
-        return (a['full_name'] ?? '').toString().compareTo(
-          (b['full_name'] ?? '').toString(),
-        );
-      });
+      ..sort((a, b) => (a['full_name'] ?? '').toString().compareTo(
+            (b['full_name'] ?? '').toString(),
+          ));
 
     // 3. Build Excel
     final excel = Excel.createExcel();
@@ -171,15 +114,15 @@ class FormTExcelGenerator {
     sheet.appendRow([TextCellValue(headerTitle)]);
     sheet.appendRow([TextCellValue('Station: $stationName')]);
     sheet.appendRow([TextCellValue('Month: $formattedMonth')]);
-    sheet.appendRow([TextCellValue('Designation: TOM OPERATOR')]);
+    sheet.appendRow([TextCellValue(isPersonalReport ? 'Designation: TOM OPERATOR' : 'Designation: OPERATOR / SUPERVISOR')]);
     sheet.appendRow([TextCellValue('')]);
 
-    // Headers
+    // Form 'T' Matching Statutory Headers
     final List<CellValue> tableHeaderRow = [
       TextCellValue('SL NO'),
-      TextCellValue('Role'),
       TextCellValue('Emp Code'),
       TextCellValue('Biometric ID'),
+      TextCellValue('BMRCL ID'),
       TextCellValue('Names'),
       TextCellValue("Father's Name"),
       TextCellValue('DOJ'),
@@ -197,22 +140,27 @@ class FormTExcelGenerator {
       final staff = allStaff[i];
       final staffId = staff['id'];
       final staffAtt = attendanceMap[staffId] ?? {};
-      final role = (staff['role'] ?? 'operator').toString().toUpperCase();
       int totalPresent = 0;
 
-      final empCodeVal = staff['emp_code'] ?? staff['company_id'] ?? '-';
-      final bioIdVal = staff['biometric_id'] ?? staff['bmrcl_id'] ?? '-';
+      final empCodeVal = (staff['emp_code'] ?? staff['company_id'] ?? '-')
+          .toString();
+      final bioIdVal = (staff['biometric_id'] ?? '-').toString();
+      final bmrclIdVal = (staff['bmrcl_id'] ?? '-').toString();
+      final fatherVal = (staff['father_name'] ?? '-').toString();
+      final dojVal = formatDisplayDate(staff['doj']?.toString());
+      final esiVal = (staff['esi_no'] ?? '-').toString();
+      final uanVal = (staff['uan_no'] ?? '-').toString();
 
       final List<CellValue> row = [
         IntCellValue(i + 1),
-        TextCellValue(role),
-        TextCellValue(empCodeVal.toString()),
-        TextCellValue(bioIdVal.toString()),
+        TextCellValue(empCodeVal.isNotEmpty ? empCodeVal : '-'),
+        TextCellValue(bioIdVal.isNotEmpty ? bioIdVal : '-'),
+        TextCellValue(bmrclIdVal.isNotEmpty ? bmrclIdVal : '-'),
         TextCellValue((staff['full_name'] ?? '-').toString()),
-        TextCellValue((staff['father_name'] ?? '-').toString()),
-        TextCellValue((staff['doj'] ?? '-').toString()),
-        TextCellValue((staff['esi_no'] ?? '-').toString()),
-        TextCellValue((staff['uan_no'] ?? '-').toString()),
+        TextCellValue(fatherVal.isNotEmpty ? fatherVal : '-'),
+        TextCellValue(dojVal.isNotEmpty ? dojVal : '-'),
+        TextCellValue(esiVal.isNotEmpty ? esiVal : '-'),
+        TextCellValue(uanVal.isNotEmpty ? uanVal : '-'),
       ];
 
       for (int d = 1; d <= daysInMonth; d++) {
@@ -221,8 +169,10 @@ class FormTExcelGenerator {
           totalPresent++;
           dailyPresentCount[d] = (dailyPresentCount[d] ?? 0) + 1;
           row.add(TextCellValue('P'));
+        } else if (status == 'A') {
+          row.add(TextCellValue('A'));
         } else {
-          row.add(TextCellValue('-'));
+          row.add(TextCellValue('A'));
         }
       }
 

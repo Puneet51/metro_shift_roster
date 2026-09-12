@@ -20,8 +20,16 @@ class ShiftAssignmentModel {
   });
 
   factory ShiftAssignmentModel.fromMap(Map<String, dynamic> map) {
-    final profileData = map['profiles'] as Map<String, dynamic>?;
-    final osData = map['operating_systems'] as Map<String, dynamic>?;
+    final profileData = map['profiles'] is Map
+        ? map['profiles'] as Map<String, dynamic>
+        : null;
+
+    // Check both potential joined table aliases for operating system
+    final osData = (map['station_operating_systems'] is Map)
+        ? map['station_operating_systems'] as Map<String, dynamic>
+        : (map['operating_systems'] is Map
+              ? map['operating_systems'] as Map<String, dynamic>
+              : null);
 
     return ShiftAssignmentModel(
       id: map['id']?.toString() ?? '',
@@ -29,13 +37,16 @@ class ShiftAssignmentModel {
       stationId: map['station_id']?.toString() ?? '',
       operatingSystemId:
           (map['operating_system_id'] ?? map['system_id'])?.toString() ?? '',
-      systemName: osData?['system_name'] ?? map['system_name'] ?? 'TOM Counter',
+      systemName:
+          osData?['system_name']?.toString() ??
+          map['system_name']?.toString() ??
+          'TOM 01',
       operatorId: map['operator_id']?.toString() ?? '',
       operatorName:
-          profileData?['full_name'] ??
-          map['operator_name'] ??
-          'Assigned Operator',
-      isOt: map['is_ot'] as bool? ?? false,
+          profileData?['full_name']?.toString() ??
+          map['operator_name']?.toString() ??
+          '',
+      isOt: map['is_ot'] == true,
     );
   }
 }
@@ -47,10 +58,12 @@ class ShiftModel {
   final String stationName;
   final String shiftName;
   final String dutyDate;
+  final String? templateId;
   final String startTime;
   final String endTime;
   final double dailyAmount;
   final bool isPublished;
+  final String? publishedByName;
   final List<ShiftAssignmentModel> assignments;
 
   const ShiftModel({
@@ -60,29 +73,52 @@ class ShiftModel {
     required this.stationName,
     required this.shiftName,
     required this.dutyDate,
+    this.templateId,
     required this.startTime,
     required this.endTime,
     required this.dailyAmount,
     this.isPublished = false,
+    this.publishedByName,
     this.assignments = const [],
   });
 
   factory ShiftModel.fromMap(
     Map<String, dynamic> map, {
-    List<ShiftAssignmentModel> assignments = const [],
+    List<ShiftAssignmentModel>? assignments,
   }) {
+    final stationData = map['stations'] is Map
+        ? map['stations'] as Map<String, dynamic>
+        : null;
+
+    // Automatically parse nested shift_assignments if present in the map
+    List<ShiftAssignmentModel> resolvedAssignments = assignments ?? [];
+    if (resolvedAssignments.isEmpty && map['shift_assignments'] is List) {
+      resolvedAssignments = (map['shift_assignments'] as List)
+          .whereType<Map>()
+          .map(
+            (item) =>
+                ShiftAssignmentModel.fromMap(Map<String, dynamic>.from(item)),
+          )
+          .toList();
+    }
+
     return ShiftModel(
-      id: map['id'] as String,
-      orgId: map['org_id'] as String,
-      stationId: map['station_id'] as String,
-      stationName: map['stations']?['name'] ?? 'Station',
-      shiftName: map['shift_name'] as String,
-      dutyDate: map['duty_date'] as String,
-      startTime: map['start_time'] as String,
-      endTime: map['end_time'] as String,
+      id: map['id']?.toString() ?? '',
+      orgId: map['org_id']?.toString() ?? '',
+      stationId: map['station_id']?.toString() ?? '',
+      stationName:
+          stationData?['name']?.toString() ??
+          map['station_name']?.toString() ??
+          'Station',
+      shiftName: map['shift_name']?.toString() ?? '',
+      dutyDate: map['duty_date']?.toString() ?? '',
+      templateId: map['template_id']?.toString(),
+      startTime: map['start_time']?.toString() ?? '',
+      endTime: map['end_time']?.toString() ?? '',
       dailyAmount: (map['daily_amount'] as num?)?.toDouble() ?? 700.00,
-      isPublished: map['is_published'] as bool? ?? false,
-      assignments: assignments,
+      isPublished: map['is_published'] == true,
+      publishedByName: map['published_by_name']?.toString(),
+      assignments: resolvedAssignments,
     );
   }
 }

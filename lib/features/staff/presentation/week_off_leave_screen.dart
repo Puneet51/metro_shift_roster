@@ -34,24 +34,32 @@ class _WeekOffLeaveScreenState extends ConsumerState<WeekOffLeaveScreen> {
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
+      appBar: AppBar(
+        title: const Text(
+          'Operator Week Offs',
+          style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+        ),
+        backgroundColor: const Color(0xFF1E3A8A),
+        iconTheme: const IconThemeData(color: Colors.white),
+        elevation: 0,
+      ),
       body: RefreshIndicator(
         color: const Color(0xFF1E3A8A),
         onRefresh: () async => ref.invalidate(staffListProvider),
         child: staffAsync.when(
           data: (staff) {
-            final filteredStaff = staff.where((op) {
+            final weekOffStaff = staff.where((op) => op.isWeekOffToday).toList();
+
+            final filteredStaff = weekOffStaff.where((op) {
               final query = _searchQuery.toLowerCase();
               return op.fullName.toLowerCase().contains(query) ||
                   op.phoneNumber.toLowerCase().contains(query);
             }).toList();
 
-            final operatorsWithWeekOff = staff
-                .where((s) => s.weekOffs > 0)
-                .length;
+            final operatorsWithWeekOff = weekOffStaff.length;
 
             return Column(
               children: [
-                // Top Metrics & Search Bar
                 Container(
                   padding: const EdgeInsets.all(12.0),
                   decoration: const BoxDecoration(
@@ -74,14 +82,14 @@ class _WeekOffLeaveScreenState extends ConsumerState<WeekOffLeaveScreen> {
                                   borderRadius: BorderRadius.circular(8),
                                 ),
                                 child: const Icon(
-                                  Icons.event_busy_rounded,
+                                  Icons.beach_access_rounded,
                                   color: Color(0xFFD97706),
                                   size: 18,
                                 ),
                               ),
                               const SizedBox(width: 8),
                               const Text(
-                                'Week Off Balances',
+                                "Today's Week Off",
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 15,
@@ -100,7 +108,7 @@ class _WeekOffLeaveScreenState extends ConsumerState<WeekOffLeaveScreen> {
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Text(
-                              '$operatorsWithWeekOff Eligible',
+                              '$operatorsWithWeekOff Operators',
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontWeight: FontWeight.bold,
@@ -154,7 +162,6 @@ class _WeekOffLeaveScreenState extends ConsumerState<WeekOffLeaveScreen> {
                   ),
                 ),
 
-                // Operator Week Off Cards
                 Expanded(
                   child: filteredStaff.isEmpty
                       ? ListView(
@@ -171,8 +178,8 @@ class _WeekOffLeaveScreenState extends ConsumerState<WeekOffLeaveScreen> {
                                   ),
                                   const SizedBox(height: 10),
                                   Text(
-                                    staff.isEmpty
-                                        ? 'No staff records found.'
+                                    weekOffStaff.isEmpty
+                                        ? 'No operators are on Week Off today.'
                                         : 'No operators matching "$_searchQuery"',
                                     style: TextStyle(
                                       color: Colors.grey.shade600,
@@ -189,7 +196,7 @@ class _WeekOffLeaveScreenState extends ConsumerState<WeekOffLeaveScreen> {
                           itemCount: filteredStaff.length,
                           itemBuilder: (ctx, i) {
                             final op = filteredStaff[i];
-                            final hasWeekOff = op.weekOffs > 0;
+                            const hasWeekOff = true;
 
                             return Container(
                               margin: const EdgeInsets.only(bottom: 8),

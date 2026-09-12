@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:metro_shift_roster/core/services/face_biometric_service.dart';
-import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
 import 'package:metro_shift_roster/features/stations/data/station_model.dart';
 import 'package:metro_shift_roster/features/punch_attendance/presentation/attendance_provider.dart';
@@ -32,6 +31,7 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
   bool _isProcessing = false;
   bool _isDisposed = false;
   Position? _preloadedPosition;
+  double? _currentDistanceToStation;
 
   @override
   void initState() {
@@ -45,10 +45,20 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
     try {
       _preloadedPosition = await Geolocator.getLastKnownPosition();
       final fresh = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.medium,
+        desiredAccuracy: LocationAccuracy.high,
         timeLimit: const Duration(seconds: 3),
       );
-      if (!_isDisposed) _preloadedPosition = fresh;
+      if (!_isDisposed) {
+        setState(() {
+          _preloadedPosition = fresh;
+          _currentDistanceToStation = Geolocator.distanceBetween(
+            fresh.latitude,
+            fresh.longitude,
+            widget.station.latitude,
+            widget.station.longitude,
+          );
+        });
+      }
     } catch (_) {}
   }
 
@@ -79,21 +89,55 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
 
     try {
       final user = ref.read(authNotifierProvider).user;
-      if (user == null) throw Exception('Operator session expired.');
+      if (user == null) {
+        throw Exception('Session expired. Please log in again.');
+      }
 
-      Position? position =
-          _preloadedPosition ?? await Geolocator.getLastKnownPosition();
-      if (position == null) {
+      // 1. Biometric registration verification
+      if (user.faceEmbedding == null || user.faceEmbedding!.isEmpty) {
+        throw Exception(
+          'Face profile not registered. Please register your face before punching.',
+        );
+      }
+
+      // 2. Fetch high accuracy position
+      Position? position = _preloadedPosition;
+      try {
         position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.medium,
-          timeLimit: const Duration(seconds: 3),
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 4),
+        );
+      } catch (_) {
+        position ??= await Geolocator.getLastKnownPosition();
+      }
+
+      if (position == null) {
+        throw Exception(
+          'Unable to acquire GPS coordinates. Ensure location is turned on.',
         );
       }
 
       if (position.isMocked) {
-        throw Exception('Mock / Fake GPS detected! Punch rejected.');
+        throw Exception('Fake / Mock GPS detected. Punch rejected.');
       }
 
+      // 3. Strict 100-Meter Geofence check
+      final distance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        widget.station.latitude,
+        widget.station.longitude,
+      );
+
+      setState(() => _currentDistanceToStation = distance);
+
+      if (distance > 100.0) {
+        throw Exception(
+          'You are ${distance.toStringAsFixed(1)}m away from ${widget.station.name}. You must be within 100m to punch.',
+        );
+      }
+
+      // 4. Capture photo and extract live face embedding
       final photo = await _cameraController!.takePicture();
       final liveEmbedding = await _faceService.extractFaceEmbeddingFromFile(
         photo.path,
@@ -103,65 +147,150 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
         await File(photo.path).delete();
       } catch (_) {}
 
-      if (liveEmbedding == null) {
+      if (liveEmbedding == null || liveEmbedding.isEmpty) {
         throw Exception(
-          'No face detected. Align your face inside the green oval.',
+          'No face detected. Ensure good lighting and keep your face inside the oval.',
         );
       }
 
-      // Check registered face embedding
-      if (user.faceEmbedding != null && user.faceEmbedding!.isNotEmpty) {
-        final similarity = _faceService.compareEmbeddings(
-          liveEmbedding,
-          user.faceEmbedding!,
-        );
-
-        if (similarity < 0.50) {
-          throw Exception(
-            'Face does not match registered profile! Please look straight at the camera.',
-          );
-        }
-      }
-
-      final res = await SupabaseService.client.rpc(
-        'process_face_punch_record',
-        params: {
-          'p_session_id': widget.activeSessionId,
-          'p_user_id': user.id,
-          'p_org_id': user.orgId ?? '00000000-0000-0000-0000-000000000001',
-          'p_station_id': widget.station.id,
-          'p_is_punch_in': widget.isPunchIn,
-          'p_face_embedding': liveEmbedding,
-          'p_lat': position.latitude,
-          'p_lng': position.longitude,
-          'p_is_mocked': position.isMocked,
-          'p_accuracy': position.accuracy,
-        },
+      // 5. Strict biometric similarity match
+      final similarity = _faceService.compareEmbeddings(
+        liveEmbedding,
+        user.faceEmbedding!,
       );
 
-      final data = res as Map<String, dynamic>;
+      if (similarity < 0.70) {
+        throw Exception(
+          'Face mismatch (${(similarity * 100).toStringAsFixed(1)}%). Biometric verification failed.',
+        );
+      }
 
-      if (data['success'] == true) {
+      // 6. Invoke unified RPC via AttendanceRepository
+      final repo = ref.read(attendanceRepositoryProvider);
+      final Map<String, dynamic> res;
+
+      if (widget.isPunchIn) {
+        res = await repo.punchIn(
+          stationId: widget.station.id,
+          lat: position.latitude,
+          lng: position.longitude,
+          faceEmbedding: liveEmbedding,
+        );
+      } else {
+        if (widget.activeSessionId == null || widget.activeSessionId!.isEmpty) {
+          throw Exception(
+            'No active punch-in session found to punch out from.',
+          );
+        }
+        res = await repo.punchOut(
+          sessionId: widget.activeSessionId!,
+          lat: position.latitude,
+          lng: position.longitude,
+          faceEmbedding: liveEmbedding,
+        );
+      }
+
+      if (res['success'] == true) {
         ref.invalidate(activePunchSessionProvider);
         ref.invalidate(operatorSummaryMetricsProvider);
         ref.invalidate(punchAuditListProvider);
 
         if (mounted) {
-          final msg = widget.isPunchIn
-              ? 'Punch In Verified — ON DUTY'
-              : 'Punch Out Verified — Marked PRESENT';
+          final isPunchIn = widget.isPunchIn;
+          final workedHours = res['hours_worked'];
+          final isPresent = res['status'] == 'present';
 
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(msg),
-              backgroundColor: const Color(0xFF059669),
-              duration: const Duration(seconds: 4),
+          await showDialog<void>(
+            context: context,
+            barrierDismissible: false,
+            builder: (ctx) => AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              title: Row(
+                children: [
+                  Icon(
+                    isPunchIn
+                        ? Icons.check_circle_rounded
+                        : (isPresent
+                              ? Icons.check_circle_rounded
+                              : Icons.warning_amber_rounded),
+                    color: isPunchIn
+                        ? const Color(0xFF059669)
+                        : (isPresent
+                              ? const Color(0xFF059669)
+                              : const Color(0xFFDC2626)),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    isPunchIn ? 'Shift Started' : 'Shift Finished',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isPunchIn
+                        ? 'Punch In Verified — ON DUTY'
+                        : (isPresent
+                              ? 'Punch Out Verified — PRESENT'
+                              : 'Punch Out Recorded — ABSENT (< 7h 50m)'),
+                    style: TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.bold,
+                      color: isPunchIn
+                          ? const Color(0xFF059669)
+                          : (isPresent
+                                ? const Color(0xFF059669)
+                                : const Color(0xFFDC2626)),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Station: ${widget.station.name}',
+                    style: const TextStyle(fontSize: 13, color: Colors.black87),
+                  ),
+                  if (!isPunchIn && workedHours != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Hours Worked: $workedHours hrs',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              actions: [
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1E3A8A),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text(
+                    'OK',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
             ),
           );
-          Navigator.of(context).pop();
         }
       } else {
-        throw Exception(data['error']?.toString() ?? 'Verification failed.');
+        throw Exception(res['error']?.toString() ?? 'Verification failed.');
       }
     } catch (e) {
       if (mounted) {
@@ -169,6 +298,7 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
           SnackBar(
             content: Text(e.toString().replaceAll('Exception: ', '')),
             backgroundColor: Colors.redAccent,
+            duration: const Duration(seconds: 4),
           ),
         );
       }
@@ -188,7 +318,14 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
   @override
   Widget build(BuildContext context) {
     final user = ref.watch(authNotifierProvider).user;
-    final isNotRegistered = user != null && !user.isFaceRegistered;
+    final isNotRegistered =
+        user != null &&
+        (!user.isFaceRegistered ||
+            user.faceEmbedding == null ||
+            user.faceEmbedding!.isEmpty);
+
+    final bool isOutOfRange =
+        _currentDistanceToStation != null && _currentDistanceToStation! > 100.0;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -231,7 +368,7 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Please register your face profile before performing punch in/out.',
+                      'Biometric identification is mandatory. Please register your face profile before performing punch in/out.',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.black54, fontSize: 13),
                     ),
@@ -246,7 +383,7 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
                       ),
                       icon: const Icon(Icons.person, color: Colors.white),
                       label: const Text(
-                        'Go to Profile',
+                        'Go to Profile to Register',
                         style: TextStyle(color: Colors.white),
                       ),
                       onPressed: () => Navigator.pushReplacement(
@@ -289,21 +426,33 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
                       decoration: BoxDecoration(
                         color: Colors.black.withOpacity(0.75),
                         borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.white24),
+                        border: Border.all(
+                          color: isOutOfRange
+                              ? Colors.redAccent
+                              : Colors.white24,
+                        ),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(
-                            Icons.verified_user_rounded,
-                            color: Colors.greenAccent,
+                          Icon(
+                            isOutOfRange
+                                ? Icons.location_off_rounded
+                                : Icons.verified_user_rounded,
+                            color: isOutOfRange
+                                ? Colors.redAccent
+                                : Colors.greenAccent,
                             size: 16,
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            '${widget.station.name} (${widget.station.punchRadiusMeters}m Geofence)',
-                            style: const TextStyle(
-                              color: Colors.white,
+                            _currentDistanceToStation != null
+                                ? '${widget.station.name} (${_currentDistanceToStation!.toStringAsFixed(0)}m / max 100m)'
+                                : '${widget.station.name} (100m Geofence)',
+                            style: TextStyle(
+                              color: isOutOfRange
+                                  ? Colors.redAccent
+                                  : Colors.white,
                               fontSize: 13,
                               fontWeight: FontWeight.w600,
                             ),
@@ -319,16 +468,20 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
                   right: 28,
                   child: ElevatedButton.icon(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: widget.isPunchIn
-                          ? const Color(0xFF1E3A8A)
-                          : const Color(0xFFD97706),
+                      backgroundColor: isOutOfRange
+                          ? Colors.grey.shade700
+                          : (widget.isPunchIn
+                                ? const Color(0xFF1E3A8A)
+                                : const Color(0xFFD97706)),
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
                       ),
                       elevation: 6,
                     ),
-                    onPressed: _isProcessing ? null : _performFacePunch,
+                    onPressed: (_isProcessing || isOutOfRange)
+                        ? null
+                        : _performFacePunch,
                     icon: _isProcessing
                         ? const SizedBox(
                             width: 22,
@@ -346,9 +499,11 @@ class _FacePunchScreenState extends ConsumerState<FacePunchScreen> {
                     label: Text(
                       _isProcessing
                           ? 'Verifying Face & Location...'
-                          : (widget.isPunchIn
-                                ? 'Punch In Now'
-                                : 'Punch Out Now'),
+                          : (isOutOfRange
+                                ? 'Out of Range (>100m)'
+                                : (widget.isPunchIn
+                                      ? 'Punch In Now'
+                                      : 'Punch Out Now')),
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 16.5,

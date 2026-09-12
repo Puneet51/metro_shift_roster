@@ -1,27 +1,62 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:metro_shift_roster/core/utils/display_formatters.dart';
 import 'package:metro_shift_roster/core/network/supabase_client.dart';
 import 'package:metro_shift_roster/features/auth/presentation/auth_provider.dart';
 import 'package:metro_shift_roster/features/profile/presentation/profile_screen.dart';
 import 'package:metro_shift_roster/features/shifts/presentation/supervisor_roster_screen.dart';
-import 'package:metro_shift_roster/features/punch_attendance/presentation/punch_audit_check_screen.dart';
-import 'package:metro_shift_roster/features/punch_attendance/presentation/punch_history_screen.dart';
-import 'package:metro_shift_roster/features/punch_attendance/presentation/attendance_provider.dart';
+import 'package:metro_shift_roster/features/shifts/presentation/shift_provider.dart';
+import 'package:metro_shift_roster/features/attendance/presentation/attendance_provider.dart';
 import 'package:metro_shift_roster/features/notifications/presentation/notification_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 final operatorOverviewProvider =
     FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
-      final user = ref.watch(authNotifierProvider).user;
-      if (user == null || user.orgId == null) return {};
+  final user = ref.watch(authNotifierProvider).user;
+  if (user == null) return {};
 
-      final res = await SupabaseService.client.rpc(
-        'get_operator_dashboard_overview',
-        params: {'p_operator_id': user.id, 'p_org_id': user.orgId},
-      );
-      return (res as Map<String, dynamic>?) ?? {};
+  final shifts = await ref.watch(operatorShiftsProvider.future);
+  final today = DateTime.now();
+  final todayKey =
+      '${today.year.toString().padLeft(4, '0')}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+
+  Map<String, dynamic> toDuty(shift, assignment) => {
+        'duty_date': shift.dutyDate,
+        'shift_name': shift.shiftName,
+        'start_time': shift.startTime,
+        'end_time': shift.endTime,
+        'station_name': shift.stationName,
+        'system_name': assignment.systemName,
+        'operator_name': user.fullName,
+        'is_ot': assignment.isOt,
+      };
+
+  final duties = <Map<String, dynamic>>[];
+  for (final shift in shifts) {
+    for (final assignment in shift.assignments) {
+      duties.add(toDuty(shift, assignment));
+    }
+  }
+
+  final todayDuties = duties.where((d) => d['duty_date'] == todayKey).toList();
+  final upcoming = duties
+      .where((d) =>
+          d['duty_date'] != null &&
+          d['duty_date'].toString().compareTo(todayKey) > 0)
+      .toList()
+    ..sort((a, b) {
+      final d = a['duty_date'].toString().compareTo(b['duty_date'].toString());
+      if (d != 0) return d;
+      final t = a['start_time'].toString().compareTo(b['start_time'].toString());
+      return t != 0 ? t : a['shift_name'].toString().compareTo(b['shift_name'].toString());
     });
+
+  return {
+    'today_duties': todayDuties,
+    'upcoming_duties': upcoming,
+  };
+});
 
 class OperatorHomeScreen extends ConsumerStatefulWidget {
   const OperatorHomeScreen({super.key});
@@ -33,11 +68,18 @@ class OperatorHomeScreen extends ConsumerStatefulWidget {
 class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
   int _currentIndex = 0;
   RealtimeChannel? _realtimeChannel;
+  Timer? _metricsRefreshTimer;
 
   @override
   void initState() {
     super.initState();
     _setupRealtimeSubscription();
+    _metricsRefreshTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (!mounted) return;
+      ref.invalidate(operatorShiftsProvider);
+      ref.invalidate(operatorOverviewProvider);
+      ref.invalidate(operatorSummaryMetricsProvider);
+    });
   }
 
   void _setupRealtimeSubscription() {
@@ -57,7 +99,8 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
           ),
           callback: (_) {
             ref.invalidate(operatorOverviewProvider);
-            ref.invalidate(activePunchSessionProvider);
+            ref.invalidate(operatorAttendanceProvider);
+            ref.invalidate(operatorSummaryMetricsProvider);
           },
         )
         .onPostgresChanges(
@@ -69,32 +112,263 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
             column: 'operator_id',
             value: user.id,
           ),
-          callback: (_) => ref.invalidate(operatorOverviewProvider),
+          callback: (_) {
+            ref.invalidate(operatorShiftsProvider);
+            ref.invalidate(operatorOverviewProvider);
+            ref.invalidate(supervisorShiftsProvider);
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'shifts',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'supervisor_id',
+            value: user.effectiveSupervisorId,
+          ),
+          callback: (_) {
+            ref.invalidate(operatorShiftsProvider);
+            ref.invalidate(operatorOverviewProvider);
+            ref.invalidate(supervisorShiftsProvider);
+          },
         )
         .subscribe();
   }
 
   @override
   void dispose() {
+    _metricsRefreshTimer?.cancel();
     if (_realtimeChannel != null) {
       SupabaseService.client.removeChannel(_realtimeChannel!);
     }
     super.dispose();
   }
 
+  Widget _buildShiftCard(Map<String, dynamic> duty, {bool showDate = false}) {
+    final isOt = duty['is_ot'] == true;
+    final baseTom =
+        (duty['system_name'] != null &&
+            duty['system_name'].toString().trim().isNotEmpty)
+        ? duty['system_name'].toString().trim()
+        : 'TOM 01';
+
+    final operatorName =
+        (duty['operator_name'] != null &&
+            duty['operator_name'].toString().trim().isNotEmpty)
+        ? duty['operator_name'].toString().trim()
+        : (ref.watch(authNotifierProvider).user?.fullName ?? '');
+
+    final counterDisplay = operatorName.isNotEmpty
+        ? '$baseTom: $operatorName'
+        : baseTom;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: isOt ? const Color(0xFF7C3AED) : const Color(0xFFE2E8F0),
+          width: isOt ? 1.5 : 1.0,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.02),
+            blurRadius: 5,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(15.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFEFF6FF),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.subway_rounded,
+                        color: Color(0xFF1E3A8A),
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      duty['station_name'] ?? 'Station',
+                      style: const TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    if (isOt)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        margin: const EdgeInsets.only(right: 6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF7C3AED),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Text(
+                          'OT',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E3A8A),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        duty['shift_name'] ?? 'Shift',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            const Divider(height: 18),
+            Row(
+              children: [
+                if (showDate && duty['duty_date'] != null) ...[
+                  const Icon(
+                    Icons.calendar_today_rounded,
+                    size: 14,
+                    color: Color(0xFF64748B),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    formatDisplayDate(duty['duty_date']?.toString()),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF334155),
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                ],
+                const Icon(
+                  Icons.access_time_rounded,
+                  size: 15,
+                  color: Color(0xFF64748B),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  '${formatDisplayTime(duty['start_time']?.toString())} - ${formatDisplayTime(duty['end_time']?.toString())}',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF334155),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.grey.shade200),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.desktop_windows_outlined,
+                    size: 16,
+                    color: Color(0xFF1E3A8A),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      counterDisplay,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1E3A8A),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildDashboardTab(Map<String, dynamic> data) {
     final user = ref.watch(authNotifierProvider).user;
-    final activeSession = ref.watch(activePunchSessionProvider).value;
-    final isOnDuty = activeSession != null;
+    final metrics = ref.watch(operatorSummaryMetricsProvider).value;
 
-    final todayDuties = (data['today_duties'] as List<dynamic>?) ?? [];
-    final upcoming = (data['upcoming_duties'] as List<dynamic>?) ?? [];
+    final todayDuties = List<Map<String, dynamic>>.from(
+      (data['today_duties'] as List<dynamic>?) ?? [],
+    );
+    final upcoming = List<Map<String, dynamic>>.from(
+      (data['upcoming_duties'] as List<dynamic>?) ?? [],
+    );
+
+    int compareDuties(Map<String, dynamic> a, Map<String, dynamic> b) {
+      final timeA = a['start_time']?.toString() ?? '';
+      final timeB = b['start_time']?.toString() ?? '';
+      final timeComp = timeA.compareTo(timeB);
+      if (timeComp != 0) return timeComp;
+
+      final shiftA = a['shift_name']?.toString() ?? '';
+      final shiftB = b['shift_name']?.toString() ?? '';
+      final shiftComp = shiftA.compareTo(shiftB);
+      if (shiftComp != 0) return shiftComp;
+
+      final tomA = a['system_name']?.toString() ?? '';
+      final tomB = b['system_name']?.toString() ?? '';
+      return tomA.compareTo(tomB);
+    }
+
+    todayDuties.sort(compareDuties);
+    upcoming.sort((a, b) {
+      final dateA = a['duty_date']?.toString() ?? '';
+      final dateB = b['duty_date']?.toString() ?? '';
+      final dateComp = dateA.compareTo(dateB);
+      return dateComp != 0 ? dateComp : compareDuties(a, b);
+    });
 
     return RefreshIndicator(
       color: const Color(0xFF1E3A8A),
       onRefresh: () async {
         ref.invalidate(operatorOverviewProvider);
-        ref.invalidate(activePunchSessionProvider);
+        ref.invalidate(operatorAttendanceProvider);
+        ref.invalidate(operatorSummaryMetricsProvider);
       },
       child: SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
@@ -102,7 +376,6 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Welcome Header
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -177,66 +450,18 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
             ),
             const SizedBox(height: 14),
 
-            // Live Duty State Banner
-            if (isOnDuty)
-              Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFEFF6FF),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFFBFDBFE)),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.timer_outlined,
-                      color: Color(0xFF1E3A8A),
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
-                          Text(
-                            'Shift In Progress (ON DUTY)',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
-                              color: Color(0xFF1E3A8A),
-                            ),
-                          ),
-                          Text(
-                            'Duty & earnings credit only after valid punch-out (>= 7h 50m).',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: Color(0xFF3B82F6),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // Performance Metrics (Verified Completed Only)
             Row(
               children: [
                 _buildStatCard(
                   'Verified Duties',
-                  '${data['total_duty'] ?? 0}',
+                  '${metrics?.totalDuty ?? (data['total_duty'] ?? 0)}',
                   const Color(0xFF2563EB),
                   Icons.check_circle_rounded,
                 ),
                 const SizedBox(width: 10),
                 _buildStatCard(
                   'Credited Earnings',
-                  '₹${(data['total_earnings'] ?? 0).toInt()}',
+                  '₹${(metrics?.earnings ?? (data['total_earnings'] ?? 0)).toInt()}',
                   const Color(0xFF059669),
                   Icons.currency_rupee_rounded,
                 ),
@@ -247,22 +472,21 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
               children: [
                 _buildStatCard(
                   'Verified OT',
-                  '${data['total_ot'] ?? 0}',
+                  '${metrics?.otDutyCount ?? (data['total_ot'] ?? 0)}',
                   const Color(0xFF7C3AED),
                   Icons.more_time_rounded,
                 ),
                 const SizedBox(width: 10),
                 _buildStatCard(
                   'Week Offs',
-                  '${data['week_offs'] ?? 0}',
+                  '${metrics?.weekOffCount ?? (data['week_offs'] ?? 0)}',
                   const Color(0xFFD97706),
-                  Icons.event_busy_rounded,
+                  Icons.beach_access_rounded,
                 ),
               ],
             ),
             const SizedBox(height: 20),
 
-            // Today's Assigned Duties
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -315,9 +539,11 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'No duties assigned for today.',
+                      'No specific roster assigned for today.',
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         color: Colors.grey.shade600,
+                        fontSize: 13,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
@@ -325,129 +551,7 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
                 ),
               )
             else
-              ...todayDuties.map((duty) {
-                final isOt = duty['is_ot'] == true;
-                return Container(
-                  margin: const EdgeInsets.symmetric(vertical: 5),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: isOt
-                          ? const Color(0xFF7C3AED)
-                          : const Color(0xFFE2E8F0),
-                      width: isOt ? 1.5 : 1.0,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.02),
-                        blurRadius: 5,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(15.0),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              duty['station_name'] ?? 'Station',
-                              style: const TextStyle(
-                                fontSize: 16.5,
-                                fontWeight: FontWeight.bold,
-                                color: Color(0xFF0F172A),
-                              ),
-                            ),
-                            Row(
-                              children: [
-                                if (isOt)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 2,
-                                    ),
-                                    margin: const EdgeInsets.only(right: 6),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF7C3AED),
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: const Text(
-                                      'OT',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF1E3A8A),
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(
-                                    duty['shift_name'] ?? 'Shift',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        const Divider(height: 18),
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.access_time_rounded,
-                              size: 15,
-                              color: Color(0xFF64748B),
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              '${duty['start_time']} - ${duty['end_time']}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                                color: Color(0xFF334155),
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            const Icon(
-                              Icons.desktop_windows_rounded,
-                              size: 15,
-                              color: Color(0xFF64748B),
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              'Counter: ${duty['system_name'] ?? "TOM Counter"}',
-                              style: const TextStyle(
-                                color: Color(0xFF64748B),
-                                fontSize: 12.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }),
+              ...todayDuties.map((duty) => _buildShiftCard(duty)),
 
             const SizedBox(height: 20),
             const Text(
@@ -469,64 +573,8 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
                 ),
               )
             else
-              ListView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                itemCount: upcoming.length,
-                itemBuilder: (ctx, i) {
-                  final duty = upcoming[i];
-                  return Container(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFFE2E8F0)),
-                    ),
-                    child: ListTile(
-                      leading: Container(
-                        padding: const EdgeInsets.all(8),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFEFF6FF),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: const Icon(
-                          Icons.subway_rounded,
-                          color: Color(0xFF1E3A8A),
-                          size: 20,
-                        ),
-                      ),
-                      title: Text(
-                        '${duty['station_name']} • ${duty['shift_name']}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                        ),
-                      ),
-                      subtitle: Text(
-                        'Date: ${duty['duty_date']} | ${duty['start_time']} - ${duty['end_time']}',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      trailing: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 3,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade100,
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          duty['system_name'] ?? 'TOM',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
+              ...upcoming.map((duty) => _buildShiftCard(duty, showDate: true)),
+
             const SizedBox(height: 20),
           ],
         ),
@@ -645,9 +693,8 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
             ),
             error: (e, _) => Center(child: Text('Error: $e')),
           ),
-          const SupervisorRosterScreen(isReadOnly: true),
-          const PunchAuditCheckScreen(),
-          const PunchHistoryScreen(),
+          SupervisorRosterScreen(isReadOnly: true),
+          SupervisorRosterScreen(isReadOnly: true, showHistory: true),
         ],
       ),
       bottomNavigationBar: Container(
@@ -686,13 +733,8 @@ class _OperatorHomeScreenState extends ConsumerState<OperatorHomeScreen> {
               label: 'Roster',
             ),
             BottomNavigationBarItem(
-              icon: Icon(Icons.camera_front_outlined),
-              activeIcon: Icon(Icons.camera_front_rounded),
-              label: 'Punch',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(Icons.history_rounded),
-              activeIcon: Icon(Icons.history_edu_rounded),
+              icon: Icon(Icons.history_outlined),
+              activeIcon: Icon(Icons.history_rounded),
               label: 'History',
             ),
           ],

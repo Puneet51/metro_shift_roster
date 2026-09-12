@@ -1,7 +1,7 @@
 import 'package:geolocator/geolocator.dart';
 
 class LocationService {
-  // In-memory cache so we never re-evaluate permission requests repeatedly on punches
+  // In-memory cache so we never re-evaluate permission requests repeatedly.
   static bool _hasGrantedPermission = false;
 
   /// Check permissions once, remember it, and fetch current device coordinates
