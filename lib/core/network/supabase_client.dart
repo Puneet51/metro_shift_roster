@@ -2,12 +2,6 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class SupabaseService {
-  // Hardcoded project fallbacks so Web/PWA does not crash if .env fails to load via HTTP
-  static const String _defaultSupabaseUrl =
-      'https://your-project-id.supabase.co'; // <-- Paste from your .env
-  static const String _defaultSupabaseAnonKey =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'; // <-- Paste from your .env
-
   static Future<void> initialize() async {
     // 1. Attempt to load .env safely
     try {
@@ -18,20 +12,18 @@ class SupabaseService {
       // Continue; configuration can still be supplied via dart-define or fallback.
     }
 
-    // 2. Read priority: .env -> --dart-define -> Hardcoded fallback
-    String supabaseUrl =
-        dotenv.maybeGet('SUPABASE_URL') ??
-        const String.fromEnvironment('SUPABASE_URL');
-    if (supabaseUrl.isEmpty) {
-      supabaseUrl = _defaultSupabaseUrl;
-    }
+    // 2. Read priority: --dart-define -> .env
+    // Web/GitHub Pages can use build-time dart-define values even when .env
+    // is not available at runtime.
+    final String supabaseUrl =
+        const String.fromEnvironment('SUPABASE_URL').isNotEmpty
+            ? const String.fromEnvironment('SUPABASE_URL')
+            : (dotenv.maybeGet('SUPABASE_URL') ?? '');
 
-    String supabaseAnonKey =
-        dotenv.maybeGet('SUPABASE_ANON_KEY') ??
-        const String.fromEnvironment('SUPABASE_ANON_KEY');
-    if (supabaseAnonKey.isEmpty) {
-      supabaseAnonKey = _defaultSupabaseAnonKey;
-    }
+    final String supabaseAnonKey =
+        const String.fromEnvironment('SUPABASE_ANON_KEY').isNotEmpty
+            ? const String.fromEnvironment('SUPABASE_ANON_KEY')
+            : (dotenv.maybeGet('SUPABASE_ANON_KEY') ?? '');
 
     if (supabaseUrl.isEmpty || supabaseAnonKey.isEmpty) {
       throw Exception(
