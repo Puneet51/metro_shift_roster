@@ -44,8 +44,118 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
   _dateRosterTree = {};
 
   // Persistent excluded/deleted TOM counters per station and exact shift template.
-  // Exact scope key = duty date + station + exact shift template.
+  // Scope intentionally excludes duty date: a deleted TOM stays deleted for
+  // the same station + shift template on present and future dates until
+  // Restore TOM is explicitly pressed. Other shifts remain unaffected.
   final Map<String, Set<String>> _excludedSystems = {};
+
+  // Keep explicitly deleted TOMs across screen/app reopen. The value is
+  // scoped to the signed-in organisation so a deletion in one roster does
+  // not affect another organisation on the same device.
+  static const String _excludedTomPrefsPrefix =
+      'metro_shift_roster_excluded_toms_v2_';
+  static const String _legacyExcludedTomPrefsPrefix =
+      'metro_shift_roster_excluded_toms_v1_';
+
+  String _excludedTomPrefsKey() {
+    final user = ref.read(authNotifierProvider).user;
+    final orgId = user?.orgId?.trim() ?? '';
+    return '$_excludedTomPrefsPrefix$orgId';
+  }
+
+  String _excludedTomScopeKey(String stationId, String templateKey) =>
+      '$stationId|$templateKey';
+
+  String _legacyExcludedTomPrefsKey() {
+    final user = ref.read(authNotifierProvider).user;
+    final orgId = user?.orgId?.trim() ?? '';
+    return '$_legacyExcludedTomPrefsPrefix$orgId';
+  }
+
+  String _excludedTomStorageKey(
+    String stationId,
+    String templateKey,
+    String systemId,
+  ) =>
+      '${_excludedTomScopeKey(stationId, templateKey)}::$systemId';
+
+  Future<void> _loadPersistedExcludedSystems() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored =
+          prefs.getStringList(_excludedTomPrefsKey()) ?? const <String>[];
+      for (final value in stored) {
+        final separator = value.lastIndexOf('::');
+        if (separator <= 0 || separator >= value.length - 2) continue;
+        final scopeKey = value.substring(0, separator);
+        final systemId = value.substring(separator + 2);
+        _excludedSystems
+            .putIfAbsent(scopeKey, () => <String>{})
+            .add(systemId);
+      }
+
+      // Migrate the first version, which incorrectly included the duty date
+      // in its key. Old deletions are deliberately promoted to the new
+      // date-independent scope so they do not suddenly reappear.
+      final legacy =
+          prefs.getStringList(_legacyExcludedTomPrefsKey()) ?? const <String>[];
+      if (legacy.isNotEmpty) {
+        final migrated = <String>{...stored};
+        for (final value in legacy) {
+          final separator = value.lastIndexOf('::');
+          if (separator <= 0 || separator >= value.length - 2) continue;
+          final oldScope = value.substring(0, separator);
+          final systemId = value.substring(separator + 2);
+          final parts = oldScope.split('|');
+          if (parts.length < 3) continue;
+          final stationId = parts[1];
+          final templateKey = parts.sublist(2).join('|');
+          final newScope = _excludedTomScopeKey(stationId, templateKey);
+          _excludedSystems
+              .putIfAbsent(newScope, () => <String>{})
+              .add(systemId);
+          migrated.add('$newScope::$systemId');
+        }
+        if (migrated.length != stored.length) {
+          await prefs.setStringList(
+            _excludedTomPrefsKey(),
+            migrated.toList(),
+          );
+        }
+      }
+    } catch (_) {
+      // Local persistence is only for remembering an explicit TOM deletion;
+      // never let a storage error prevent the roster screen from opening.
+    }
+  }
+
+  Future<void> _persistExcludedTom(
+    String stationId,
+    String templateKey,
+    String systemId,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored =
+          (prefs.getStringList(_excludedTomPrefsKey()) ?? <String>[]).toSet();
+      stored.add(_excludedTomStorageKey(stationId, templateKey, systemId));
+      await prefs.setStringList(_excludedTomPrefsKey(), stored.toList());
+    } catch (_) {}
+  }
+
+  Future<void> _removePersistedExcludedTom(
+    String stationId,
+    String templateKey,
+    String systemId,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored =
+          (prefs.getStringList(_excludedTomPrefsKey()) ?? <String>[]).toSet();
+      stored.remove(_excludedTomStorageKey(stationId, templateKey, systemId));
+      await prefs.setStringList(_excludedTomPrefsKey(), stored.toList());
+    } catch (_) {}
+  }
 
   // Latest known assignments per station and exact shift template.
   final Map<String, Map<String, Map<String, Map<String, dynamic>>>>
@@ -94,33 +204,6 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
   String _rosterScopeKey(String dateKey, String stationId, String templateKey) =>
       '$dateKey|$stationId|$templateKey';
 
-  String _excludedTomsPrefsKey(String stationId, String templateKey) =>
-      'metro_shift_roster_excluded_toms_v1|$stationId|$templateKey';
-
-  Future<Set<String>> _loadPersistedExcludedToms(
-    String stationId,
-    String templateKey,
-  ) async {
-    final prefs = await SharedPreferences.getInstance();
-    return (prefs.getStringList(_excludedTomsPrefsKey(stationId, templateKey)) ?? const <String>[])
-        .where((id) => id.trim().isNotEmpty)
-        .toSet();
-  }
-
-  Future<void> _savePersistedExcludedToms(
-    String stationId,
-    String templateKey,
-    Set<String> ids,
-  ) async {
-    final prefs = await SharedPreferences.getInstance();
-    final key = _excludedTomsPrefsKey(stationId, templateKey);
-    if (ids.isEmpty) {
-      await prefs.remove(key);
-    } else {
-      await prefs.setStringList(key, ids.toList());
-    }
-  }
-
   Future<void> _loadExistingAssignments() async {
     setState(() => _isLoadingExisting = true);
     try {
@@ -145,6 +228,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
 
       _dateRosterTree.clear();
       _excludedSystems.clear();
+      await _loadPersistedExcludedSystems();
       _stationLatestTemplate.clear();
       _shiftIdsByRosterKey.clear();
       _singleEditTemplateId = null;
@@ -217,39 +301,6 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
               _stationLatestTemplate[s.stationId]![templateKey]![a
                   .operatingSystemId] = Map.from(assignmentData);
             }
-          }
-        }
-      }
-
-      // Restore only the TOMs that were explicitly deleted for each exact
-      // station + shift template. This persistence is independent of the
-      // selected duty date, so a deleted TOM does not reappear when the
-      // same shift is opened again for the present or a future date.
-      final persistedByTemplate = <String, Set<String>>{};
-      for (final scope in _shiftIdsByRosterKey.keys) {
-        final parts = scope.split('|');
-        if (parts.length < 3) continue;
-        final stationId = parts[1];
-        final templateKey = parts.sublist(2).join('|');
-        final persisted = await _loadPersistedExcludedToms(
-          stationId,
-          templateKey,
-        );
-        if (persisted.isEmpty) continue;
-        persistedByTemplate['$stationId|$templateKey'] = persisted;
-      }
-      for (final dateEntry in _dateRosterTree.entries) {
-        for (final stationEntry in dateEntry.value.entries) {
-          for (final templateKey in stationEntry.value.keys) {
-            final persistedKey = stationEntry.key + '|' + templateKey;
-            final persisted = persistedByTemplate[persistedKey];
-            if (persisted == null || persisted.isEmpty) continue;
-            _excludedSystems
-                .putIfAbsent(
-                  _rosterScopeKey(dateEntry.key, stationEntry.key, templateKey),
-                  () => <String>{},
-                )
-                .addAll(persisted);
           }
         }
       }
@@ -332,6 +383,30 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
     return systems;
   }
 
+  Map<String, dynamic>? _latestAssignmentForDate(
+    String stationId,
+    String rosterKey,
+    String systemId,
+    String dateKey,
+  ) {
+    // Prefill a new/upcoming date from the most recent saved roster on or
+    // before that date for the same station + exact shift template + TOM.
+    // This avoids making the supervisor reassign every unchanged TOM.
+    final candidateDates = _dateRosterTree.keys
+        .where((d) => d.compareTo(dateKey) <= 0)
+        .toList()
+      ..sort((a, b) => b.compareTo(a));
+
+    for (final candidateDate in candidateDates) {
+      final data = _dateRosterTree[candidateDate]?[stationId]?[rosterKey]?[systemId];
+      final operatorId = data?['operator_id'];
+      if (operatorId != null && operatorId.toString().trim().isNotEmpty) {
+        return Map<String, dynamic>.from(data!);
+      }
+    }
+    return null;
+  }
+
   void _initStationRoster(StationModel stn) {
     final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
     _dateRosterTree.putIfAbsent(dateKey, () => {});
@@ -344,19 +419,33 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
       final rosterKey = _rosterKey(tmpl);
       _dateRosterTree[dateKey]![stn.id]!.putIfAbsent(rosterKey, () => {});
 
-      for (int i = 0; i < systems.length; i++) {
-        final sys = systems[i];
+      for (final sys in systems) {
         final existing =
             _dateRosterTree[dateKey]![stn.id]![rosterKey]?[sys.id];
 
         if (existing == null) {
-          // An unassigned counter must stay unassigned. Never carry an
-          // operator from another date/shift merely because the time is the
-          // same. Assignments belong to one exact station + shift + TOM.
-          _dateRosterTree[dateKey]![stn.id]![rosterKey]![sys.id] = {
-            'operator_id': null,
-            'is_ot': false,
-          };
+          final fallback = _latestAssignmentForDate(
+            stn.id,
+            rosterKey,
+            sys.id,
+            dateKey,
+          );
+
+          _dateRosterTree[dateKey]![stn.id]![rosterKey]![sys.id] =
+              fallback ?? {
+                'operator_id': null,
+                'is_ot': false,
+              };
+        }
+
+        final assignment =
+            _dateRosterTree[dateKey]![stn.id]![rosterKey]![sys.id];
+        final operatorId = assignment?['operator_id'];
+        if (operatorId != null && operatorId.toString().trim().isNotEmpty) {
+          _stationLatestTemplate.putIfAbsent(stn.id, () => {});
+          _stationLatestTemplate[stn.id]!.putIfAbsent(rosterKey, () => {});
+          _stationLatestTemplate[stn.id]![rosterKey]![sys.id] =
+              Map<String, dynamic>.from(assignment!);
         }
       }
     }
@@ -489,7 +578,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
         final shiftAssignments = stationRosters[rosterKey];
         if (shiftAssignments == null) continue;
 
-        final excludedSet = _excludedSystems[_rosterScopeKey(formattedDate, stn.id, rosterKey)] ?? <String>{};
+        final excludedSet = _excludedSystems[_excludedTomScopeKey(stn.id, rosterKey)] ?? <String>{};
 
         final List<Map<String, dynamic>> rawAssignments = [];
         final List<String> clearedSystemIds = [];
@@ -931,8 +1020,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                     final rosterKey = _rosterKey(tmpl);
 
                                     final excludedSet =
-                                        _excludedSystems[_rosterScopeKey(
-                                          dateKey,
+                                        _excludedSystems[_excludedTomScopeKey(
                                           currentStation.id,
                                           rosterKey,
                                         )] ??
@@ -1029,8 +1117,7 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                           ? null
                                                           : () {
                                                               setState(() {
-                                                                final scopeKey = _rosterScopeKey(
-                                                                  dateKey,
+                                                                final scopeKey = _excludedTomScopeKey(
                                                                   currentStation.id,
                                                                   rosterKey,
                                                                 );
@@ -1041,11 +1128,9 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                 )
                                                                     .add(sys.id);
 
-                                                                _savePersistedExcludedToms(
-                                                                  currentStation.id,
-                                                                  rosterKey,
-                                                                  _excludedSystems[scopeKey]!,
-                                                                );
+                                                                // Persist the explicit deletion so reopening this shift does not
+                                                                // recreate the TOM. It stays excluded until Restore is pressed.
+                                                                _persistExcludedTom(currentStation.id, rosterKey, sys.id);
 
                                                                 // Preserve the current
                                                                 // assignment so Restore TOM
@@ -1383,21 +1468,17 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                         setState(() {
                                                           // Restore only the TOM that the
                                                           // supervisor explicitly deleted.
-                                                          _excludedSystems[_rosterScopeKey(
-                                                                  dateKey,
-                                                                  currentStation.id,
-                                                                  rosterKey,
-                                                                )]
+                                                          final restoreScopeKey =
+                                                              _excludedTomScopeKey(
+                                                                currentStation.id,
+                                                                rosterKey,
+                                                              );
+                                                          _excludedSystems[restoreScopeKey]
                                                               ?.remove(dSys.id);
-
-                                                          _savePersistedExcludedToms(
+                                                          _removePersistedExcludedTom(
                                                             currentStation.id,
                                                             rosterKey,
-                                                            _excludedSystems[_rosterScopeKey(
-                                                                  dateKey,
-                                                                  currentStation.id,
-                                                                  rosterKey,
-                                                                )] ?? <String>{},
+                                                            dSys.id,
                                                           );
 
                                                           // Restore its previous operator

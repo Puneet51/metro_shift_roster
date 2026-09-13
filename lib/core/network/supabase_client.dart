@@ -3,16 +3,9 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 class SupabaseService {
   static Future<void> initialize() async {
-    // 1. Attempt to load .env safely
-    try {
-      if (!dotenv.isInitialized) {
-        await dotenv.load(fileName: ".env");
-      }
-    } catch (_) {
-      // Continue; configuration can still be supplied via dart-define or fallback.
-    }
-
-    // 2. Read priority: --dart-define -> .env
+    // 1. Read priority: --dart-define -> .env.
+    // On web, .env is intentionally not loaded at runtime; GitHub Pages
+    // supplies configuration through --dart-define at build time.
     // Web/GitHub Pages can use build-time dart-define values even when .env
     // is not available at runtime.
     final String supabaseUrl =
@@ -32,8 +25,11 @@ class SupabaseService {
       );
     }
 
+
+
     await Supabase.initialize(url: supabaseUrl, anonKey: supabaseAnonKey);
   }
+
 
   static SupabaseClient get client => Supabase.instance.client;
 }

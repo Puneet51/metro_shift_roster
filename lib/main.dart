@@ -15,11 +15,20 @@ import 'package:metro_shift_roster/features/auth/presentation/splash_screen.dart
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 1. Attempt to load .env safely
-  try {
-    await dotenv.load(fileName: ".env");
-  } catch (e) {
-    debugPrint('DotEnv load notice: $e');
+  // 1. Load .env only when build-time Supabase values are not supplied.
+  // This makes both workflows work:
+  //   - Local: flutter run -d chrome (uses .env)
+  //   - GitHub Pages: --dart-define values (no runtime .env dependency)
+  final hasSupabaseDartDefines =
+      const String.fromEnvironment('SUPABASE_URL').isNotEmpty &&
+      const String.fromEnvironment('SUPABASE_ANON_KEY').isNotEmpty;
+
+  if (!hasSupabaseDartDefines) {
+    try {
+      await dotenv.load(fileName: ".env");
+    } catch (e) {
+      debugPrint('DotEnv load notice: $e');
+    }
   }
 
   // 2. Initialize Supabase before any provider accesses Supabase.instance.

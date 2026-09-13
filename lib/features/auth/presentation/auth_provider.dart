@@ -194,6 +194,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
         throw Exception('Please enter a valid 10-digit mobile number');
       }
 
+
       final res = await SupabaseService.client.rpc(
         'check_phone_registration',
         params: {'p_phone': cleanPhone},
@@ -221,6 +222,11 @@ class AuthNotifier extends StateNotifier<AuthState> {
           pendingPhone: cleanPhone,
         );
       }
+    } on supabase.PostgrestException catch (e) {
+      state = state.copyWith(
+        status: AuthStatus.error,
+        errorMessage: e.toString().replaceAll('Exception: ', ''),
+      );
     } catch (e) {
       state = state.copyWith(
         status: AuthStatus.error,
