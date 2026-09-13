@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:metro_shift_roster/core/utils/display_formatters.dart';
 import 'package:metro_shift_roster/features/stations/presentation/station_provider.dart';
 import 'package:metro_shift_roster/features/stations/data/station_model.dart';
@@ -92,6 +93,33 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
 
   String _rosterScopeKey(String dateKey, String stationId, String templateKey) =>
       '$dateKey|$stationId|$templateKey';
+
+  String _excludedTomsPrefsKey(String stationId, String templateKey) =>
+      'metro_shift_roster_excluded_toms_v1|$stationId|$templateKey';
+
+  Future<Set<String>> _loadPersistedExcludedToms(
+    String stationId,
+    String templateKey,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getStringList(_excludedTomsPrefsKey(stationId, templateKey)) ?? const <String>[])
+        .where((id) => id.trim().isNotEmpty)
+        .toSet();
+  }
+
+  Future<void> _savePersistedExcludedToms(
+    String stationId,
+    String templateKey,
+    Set<String> ids,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = _excludedTomsPrefsKey(stationId, templateKey);
+    if (ids.isEmpty) {
+      await prefs.remove(key);
+    } else {
+      await prefs.setStringList(key, ids.toList());
+    }
+  }
 
   Future<void> _loadExistingAssignments() async {
     setState(() => _isLoadingExisting = true);
@@ -189,6 +217,39 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
               _stationLatestTemplate[s.stationId]![templateKey]![a
                   .operatingSystemId] = Map.from(assignmentData);
             }
+          }
+        }
+      }
+
+      // Restore only the TOMs that were explicitly deleted for each exact
+      // station + shift template. This persistence is independent of the
+      // selected duty date, so a deleted TOM does not reappear when the
+      // same shift is opened again for the present or a future date.
+      final persistedByTemplate = <String, Set<String>>{};
+      for (final scope in _shiftIdsByRosterKey.keys) {
+        final parts = scope.split('|');
+        if (parts.length < 3) continue;
+        final stationId = parts[1];
+        final templateKey = parts.sublist(2).join('|');
+        final persisted = await _loadPersistedExcludedToms(
+          stationId,
+          templateKey,
+        );
+        if (persisted.isEmpty) continue;
+        persistedByTemplate['$stationId|$templateKey'] = persisted;
+      }
+      for (final dateEntry in _dateRosterTree.entries) {
+        for (final stationEntry in dateEntry.value.entries) {
+          for (final templateKey in stationEntry.value.keys) {
+            final persistedKey = stationEntry.key + '|' + templateKey;
+            final persisted = persistedByTemplate[persistedKey];
+            if (persisted == null || persisted.isEmpty) continue;
+            _excludedSystems
+                .putIfAbsent(
+                  _rosterScopeKey(dateEntry.key, stationEntry.key, templateKey),
+                  () => <String>{},
+                )
+                .addAll(persisted);
           }
         }
       }
@@ -980,6 +1041,12 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                 )
                                                                     .add(sys.id);
 
+                                                                _savePersistedExcludedToms(
+                                                                  currentStation.id,
+                                                                  rosterKey,
+                                                                  _excludedSystems[scopeKey]!,
+                                                                );
+
                                                                 // Preserve the current
                                                                 // assignment so Restore TOM
                                                                 // can put the same operator
@@ -1322,6 +1389,16 @@ class _CreateEditShiftScreenState extends ConsumerState<CreateEditShiftScreen> {
                                                                   rosterKey,
                                                                 )]
                                                               ?.remove(dSys.id);
+
+                                                          _savePersistedExcludedToms(
+                                                            currentStation.id,
+                                                            rosterKey,
+                                                            _excludedSystems[_rosterScopeKey(
+                                                                  dateKey,
+                                                                  currentStation.id,
+                                                                  rosterKey,
+                                                                )] ?? <String>{},
+                                                          );
 
                                                           // Restore its previous operator
                                                           // assignment, if one was saved.
